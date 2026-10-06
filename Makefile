@@ -1,4 +1,4 @@
-# Compiscript — Análisis Semántico
+# Compiscript — Análisis Semántico y Generación de Código Intermedio
 # Uso local (requiere Java y el runtime de Python):
 #   make venv      -> crea .venv e instala dependencias
 #   make grammar   -> genera lexer/parser/visitor en compiscript/generated
