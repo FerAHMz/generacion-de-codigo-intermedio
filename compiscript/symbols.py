@@ -22,24 +22,22 @@ import json
 from dataclasses import dataclass, field
 from typing import Dict, Iterator, List, Optional, Tuple
 
-from .types import BOOLEAN, ClassType, FLOAT, FunctionType, Type, VOID
+from .types import BOOLEAN, ClassType, FunctionType, Type, VOID
 
 
 # ---------------------------------------------------------------------------
 # Tamaños en bytes
 # ---------------------------------------------------------------------------
 
-WORD = 4            # enteros, referencias (string, arreglos, objetos) y punteros
-TEMP_SLOT = 8       # cada temporal ocupa una ranura capaz de guardar un float
-HEADER_SIZE = 3 * WORD   # control link + dirección de retorno + static link
+WORD = 4            # palabra de MIPS: integer, float, referencias y punteros
+TEMP_SLOT = WORD    # cada temporal ocupa una palabra (int o float de precisión simple)
 
 
 def sizeof(t: Optional[Type]) -> int:
-    """Bytes que ocupa un valor de tipo `t` en memoria.
-    integer: 4, float: 8, boolean: 1; string, arreglos y objetos son
-    referencias de 4 bytes (el contenido vive en el heap)."""
-    if t == FLOAT:
-        return 8
+    """Bytes que ocupa un valor de tipo `t` en memoria (pensado para MIPS32).
+    integer: 4, float: 4 (IEEE 754 de precisión simple, registros $f),
+    boolean: 1 (lb/sb); string, arreglos y objetos son referencias de 4 bytes
+    (el contenido vive en el heap)."""
     if t == BOOLEAN:
         return 1
     return WORD
@@ -110,6 +108,7 @@ class FunctionSymbol(Symbol):
     return_type: Type = VOID
     body_scope: Optional["Scope"] = None
     captures: List[Symbol] = field(default_factory=list)   # closures
+    calls: List["FunctionSymbol"] = field(default_factory=list)  # funciones/métodos que invoca
     has_return: bool = False
     activation: Optional["ActivationRecord"] = None
     owner_class: Optional["ClassSymbol"] = None            # métodos
@@ -289,25 +288,28 @@ _DATA_KINDS = (SymbolKind.VARIABLE, SymbolKind.CONSTANT, SymbolKind.PARAMETER, S
 
 @dataclass
 class ActivationRecord:
-    """Marco de una función en la pila. Direcciones relativas a `fp`:
+    """Marco de una función en la pila. Cada campo del encabezado existe solo
+    si la función lo usa (se decide con el grafo de llamadas y las capturas):
 
-        fp + 12 + ...   parámetros (el 0 es `this` en los métodos)
-        fp + 8          static link   (marco de la función que la contiene léxicamente)
-        fp + 4          dirección de retorno
-        fp + 0          control link  (fp del llamador)
-        fp - 1 ...      locales (incluye los de bloques anidados, aplanados)
-        ...             temporales (TEMP_SLOT bytes cada uno)
+        fp + ...        parámetros (el 0 es `this` en los métodos); los apila el llamador
+        [static link]   la función, o una anidada en ella, lee variables de una
+                        función externa (closures) o llama a una función que lo necesita
+        [dir. retorno]  la función llama a otras (no es hoja): `jal` sobrescribe $ra
+        fp + 0          control link (fp del llamador), para restaurarlo al retornar
+        fp - ...        locales (incluye los de bloques anidados, aplanados)
+        ...             temporales (una palabra cada uno; en MIPS, ranuras de spill)
 
-    `frame_size` = encabezado + parámetros + locales + temporales.
-    `level` es la profundidad de anidamiento léxico (main = 0, función
-    global = 1, anidada = 2, ...): para leer una variable capturada se siguen
-    `nivel_actual - nivel_dueño` enlaces estáticos.
+    `main` (código de nivel superior, nivel 0) no tiene encabezado: nadie la
+    llama ni retorna a un llamador. `level` es la profundidad léxica (main = 0,
+    función global = 1, anidada = 2, ...): para leer una variable capturada se
+    siguen `nivel_actual - nivel_dueño` enlaces estáticos.
     """
 
-    CONTROL_LINK = 0
-    RETURN_ADDRESS = WORD
-    STATIC_LINK = 2 * WORD
-    PARAMS_BASE = HEADER_SIZE
+    HEADER_USES = {
+        "control_link": "restaurar el fp del llamador al retornar",
+        "return_address": "volver al llamador: la función hace llamadas y jal sobrescribe $ra",
+        "static_link": "acceder a variables de funciones externas (closures)",
+    }
 
     name: str
     label: str
@@ -320,13 +322,42 @@ class ActivationRecord:
     params_size: int = 0
     locals_size: int = 0
     temp_count: int = 0
+    needs_control_link: bool = True
+    needs_return_address: bool = True
+    needs_static_link: bool = False
+
+    # --- encabezado ---------------------------------------------------------------
+
+    def header(self) -> List[str]:
+        """Campos presentes, de fp+0 hacia arriba."""
+        out = []
+        if self.needs_control_link:
+            out.append("control_link")
+        if self.needs_return_address:
+            out.append("return_address")
+        if self.needs_static_link:
+            out.append("static_link")
+        return out
+
+    @property
+    def header_size(self) -> int:
+        return WORD * len(self.header())
+
+    def header_offset(self, name: str) -> Optional[int]:
+        """Offset (respecto a fp) de un campo del encabezado, o None si no existe."""
+        fields = self.header()
+        return WORD * fields.index(name) if name in fields else None
+
+    @property
+    def params_base(self) -> int:
+        return self.header_size
 
     # --- construcción -------------------------------------------------------------
 
     def add_param(self, sym: Symbol) -> None:
-        off = align(self.PARAMS_BASE + self.params_size, min(sym.size, WORD))
+        off = align(self.params_base + self.params_size, min(sym.size, WORD))
         sym.storage, sym.frame_offset = Storage.PARAM, off
-        self.params_size = off + sym.size - self.PARAMS_BASE
+        self.params_size = off + sym.size - self.params_base
         self.params.append(sym)
 
     def add_local(self, sym: Symbol) -> None:
@@ -343,7 +374,7 @@ class ActivationRecord:
 
     @property
     def temps_base(self) -> int:
-        return align(self.locals_size, TEMP_SLOT)
+        return align(self.locals_size, WORD)
 
     def temp_address(self, index: int) -> str:
         """Dirección de la ranura del temporal t{index} (1-based)."""
@@ -355,28 +386,30 @@ class ActivationRecord:
 
     @property
     def frame_size(self) -> int:
-        return HEADER_SIZE + self.params_size + self.temps_base + self.temps_size
+        return self.header_size + align(self.params_size, WORD) + self.temps_base + self.temps_size
 
     def slots(self) -> List[dict]:
         """Contenido del marco, de direcciones altas a bajas (para el volcado)."""
-        out = [{"address": p.address, "content": f"param {p.name}: {p.type}", "size": p.size}
-               for p in reversed(self.params)]
-        out += [
-            {"address": f"fp[+{self.STATIC_LINK}]", "content": "static link"
-                + (f" -> {self.parent.label}" if self.parent else ""), "size": WORD},
-            {"address": f"fp[+{self.RETURN_ADDRESS}]", "content": "dirección de retorno", "size": WORD},
-            {"address": f"fp[+{self.CONTROL_LINK}]", "content": "control link (fp anterior)", "size": WORD},
-        ]
-        out += [{"address": s.address, "content": f"local {s.name}: {s.type}", "size": s.size}
-                for s in self.locals]
-        out += [{"address": self.temp_address(i), "content": f"temporal t{i}", "size": TEMP_SLOT}
-                for i in range(1, self.temp_count + 1)]
+        out = [{"address": p.address, "content": f"param {p.name}: {p.type}", "size": p.size,
+                "use": "argumento"} for p in reversed(self.params)]
+        names = {"control_link": "control link (fp anterior)",
+                 "return_address": "dirección de retorno",
+                 "static_link": "static link" + (f" -> {self.parent.label}" if self.parent else "")}
+        for h in reversed(self.header()):
+            out.append({"address": f"fp[+{self.header_offset(h)}]", "content": names[h],
+                        "size": WORD, "use": self.HEADER_USES[h]})
+        out += [{"address": s.address, "content": f"local {s.name}: {s.type}", "size": s.size,
+                 "use": "variable local"} for s in self.locals]
+        out += [{"address": self.temp_address(i), "content": f"temporal t{i}", "size": TEMP_SLOT,
+                 "use": "valor intermedio"} for i in range(1, self.temp_count + 1)]
         return out
 
     def to_dict(self) -> dict:
         return {
             "name": self.name, "label": self.label, "level": self.level,
-            "static_link": self.parent.label if self.parent else None,
+            "static_link": self.parent.label if self.parent and self.needs_static_link else None,
+            "header": [{"field": h, "offset": self.header_offset(h), "use": self.HEADER_USES[h]}
+                       for h in self.header()],
             "params_size": self.params_size, "locals_size": self.locals_size,
             "temps": self.temp_count, "frame_size": self.frame_size,
             "slots": self.slots(),
@@ -524,7 +557,7 @@ class SymbolTable:
                         prefix = f"{outer.label}_" if outer is not None and outer.label else ""
                         sym.label = unique(prefix + sym.name)
 
-        # 2) variables globales y un registro de activación por función.
+        # 2) un registro de activación por función (aún sin parámetros).
         records: Dict[int, ActivationRecord] = {}
         for scope in self.scopes:
             if scope.kind == ScopeKind.FUNCTION and isinstance(scope.owner, FunctionSymbol):
@@ -536,15 +569,19 @@ class SymbolTable:
                 if fn.owner_class is not None:
                     ar.this = Symbol("this", SymbolKind.PARAMETER, fn.owner_class.type,
                                      fn.line, fn.column, scope=scope, initialized=True)
-                    ar.add_param(ar.this)
-                    self._owner[id(ar.this)] = ar
-                for prm in fn.params:
-                    ar.add_param(prm)
-                    self._owner[id(prm)] = ar
                 fn.activation = ar
                 records[scope.id] = ar
                 self.activation_records.append(ar)
 
+        # 3) qué campos del encabezado usa cada marco.
+        self._decide_header(records, function_scope)
+
+        # 4) parámetros, locales y globales.
+        for ar in self.activation_records[1:]:
+            for prm in ([ar.this] if ar.this else []) + list(ar.function.params):
+                ar.add_param(prm)
+                self._owner[id(prm)] = ar
+        for scope in self.scopes:
             if scope.kind == ScopeKind.CLASS:
                 continue   # los atributos se ubican en el layout del objeto
             fscope = function_scope(scope)
@@ -561,12 +598,53 @@ class SymbolTable:
                     ar.add_local(sym)
                     self._owner[id(sym)] = ar
 
-        # 3) layout de cada clase (el padre primero).
+        # 5) layout de cada clase (el padre primero).
         for scope in self.scopes:
             for sym in scope.symbols.values():
                 if isinstance(sym, ClassSymbol):
                     self._layout(sym)
         return self
+
+    def _decide_header(self, records: Dict[int, ActivationRecord], function_scope) -> None:
+        """Encabezado por uso:
+          * main no tiene encabezado;
+          * dirección de retorno solo en funciones que llaman a otras;
+          * static link en cada marco que hay que atravesar para llegar a una
+            variable capturada, y en el llamador que debe calcular el static link
+            de una función que lo necesita (punto fijo sobre el grafo de llamadas).
+        """
+        self.main.needs_control_link = False
+        self.main.needs_return_address = False
+        ars = self.activation_records[1:]
+        for ar in ars:
+            ar.needs_return_address = bool(ar.function.calls)
+
+        def mark(ar: ActivationRecord, hops: int) -> bool:
+            changed, cur = False, ar
+            for _ in range(hops):
+                if cur is None or cur is self.main:
+                    break
+                if not cur.needs_static_link:
+                    cur.needs_static_link = changed = True
+                cur = cur.parent
+            return changed
+
+        for ar in ars:
+            for captured in ar.function.captures:
+                owner_scope = function_scope(captured.scope) if captured.scope else None
+                owner = records.get(owner_scope.id) if owner_scope else None
+                if owner is not None:
+                    mark(ar, ar.level - owner.level)
+        changed = True
+        while changed:
+            changed = False
+            for ar in ars:
+                for callee in ar.function.calls:
+                    target = callee.activation
+                    if target is not None and target.needs_static_link:
+                        # el static link del llamado es el marco de nivel q-1:
+                        # desde el llamador (nivel p) se siguen p - q + 1 enlaces.
+                        changed |= mark(ar, ar.level - target.level + 1)
 
     def _layout(self, cls: ClassSymbol) -> ClassLayout:
         if cls.layout is not None:
@@ -685,7 +763,7 @@ class SymbolTable:
             if row["address"].startswith("global"):
                 out.append(f"  {row['address']:<14} {row['name']}: {row['type']}")
         for ar in self.activation_records:
-            link = f", static link -> {ar.parent.label}" if ar.parent else ""
+            link = f", static link -> {ar.parent.label}" if ar.needs_static_link else ""
             out.append("")
             out.append(f"Registro de activación {ar.label} (nivel {ar.level}{link}) "
                        f"frame_size = {ar.frame_size}")

@@ -32,7 +32,7 @@ Los operandos son objetos tipados, no texto:
 | Operando | Se imprime | Contenido |
 |---|---|---|
 | `Temp(n)` | `t1`, `t2`, … | temporal; lo asigna y recicla `TempAllocator` |
-| `Var(name, address, hops)` | `x` | variable del fuente; `address` es su dirección (`global[8]`, `fp[+12]`, `fp[-4]`); `hops` = enlaces estáticos a seguir (closures) |
+| `Var(name, address, hops)` | `x` | variable del fuente; `address` es su dirección (`global[8]`, `fp[+4]`, `fp[-4]`); `hops` = enlaces estáticos a seguir (closures) |
 | `Const(value)` | `5`, `2.5`, `"hola"`, `true`, `null` | literal |
 | `Label(name)` | `L3`, `fact`, `Perro_hablar` | etiqueta de salto o de función/clase |
 | `Field(name, offset)` | — | atributo: se imprime como `[obj + offset]` con el nombre en comentario |
@@ -84,13 +84,15 @@ tiene su `func_end`.
 
 ### 4.1 Tamaños
 
-| Tipo | Bytes |
-|---|---|
-| `integer` | 4 |
-| `float` | 8 |
-| `boolean` | 1 |
-| `string`, arreglos, objetos (referencias) | 4 |
-| ranura de temporal | 8 (cabe un float) |
+Los tamaños se eligieron pensando en MIPS32 (palabra de 4 bytes):
+
+| Tipo | Bytes | En MIPS |
+|---|---|---|
+| `integer` | 4 | `lw`/`sw`, registros `$t`/`$s` |
+| `float` | 4 | precisión simple, `l.s`/`s.s`, registros `$f` |
+| `boolean` | 1 | `lb`/`sb` |
+| `string`, arreglos, objetos (referencias) | 4 | dirección en el heap o en `.data` |
+| ranura de temporal | 4 | ranura de *spill* |
 
 Cada dato se alinea a su tamaño.
 
@@ -99,27 +101,40 @@ Cada dato se alinea a su tamaño.
 | Dónde se declara | Dirección | Ejemplo |
 |---|---|---|
 | Nivel superior (incluye bloques/bucles de nivel superior) | área estática | `global[8]` |
-| Parámetro | positiva respecto a `fp` | `fp[+12]` |
+| Parámetro | positiva respecto a `fp` | `fp[+4]` |
 | Local de una función (bloques anidados aplanados) | negativa respecto a `fp` | `fp[-4]` |
 | Atributo de clase | desplazamiento en el objeto | `this[+4]` → `[obj + 4]` |
 
-### 4.3 Registro de activación
+### 4.3 Registro de activación (campos según su uso)
+
+No hay una lista fija de campos: cada uno se incluye solo si la función lo usa.
 
 ```
-            ┌─────────────────────────┐
- fp + 12+   │ parámetros (0 = this)   │  ← los apila el llamador con `param`
- fp + 8     │ static link             │  ← marco de la función que la contiene léxicamente
- fp + 4     │ dirección de retorno    │
- fp + 0     │ control link (fp previo)│
- fp - 4…    │ locales (aplanados)     │
-            │ temporales t1…tN        │  (8 B cada uno)
-            └─────────────────────────┘
-frame_size = 12 + parámetros + locales (alineado a 8) + 8·temporales
+            ┌──────────────────────────┐
+ fp + …     │ parámetros (0 = this)    │  ← los apila el llamador con `param`
+ [opcional] │ static link              │  ← la función (o una anidada) lee variables de una externa
+ [opcional] │ dirección de retorno     │  ← la función llama a otras (`jal` sobrescribe $ra)
+ fp + 0     │ control link (fp previo) │  ← siempre (salvo main): restaurar el fp al retornar
+ fp - 4…    │ locales (aplanados)      │
+            │ temporales t1…tN         │  (4 B cada uno; en MIPS, ranuras de spill)
+            └──────────────────────────┘
+frame_size = encabezado + parámetros + locales + 4·temporales
 ```
+
+| Campo | Se incluye cuando | Para qué |
+|---|---|---|
+| control link | siempre, excepto en `main` | restaurar el `fp` del llamador al retornar |
+| dirección de retorno | la función hace alguna llamada (no es hoja) | guardar `$ra`, que `jal` sobrescribe |
+| static link | hay que atravesar el marco para llegar a una variable capturada, o la función llama a otra que necesita static link | closures |
+| parámetros, locales | siempre que existan | datos de la función |
+| temporales | `max_live > 0` | valores intermedios que no caben en registros |
+
+El static link se decide con las capturas de cada función y un punto fijo sobre
+el grafo de llamadas que registra la fase semántica (`FunctionSymbol.calls`).
 
 * El código de nivel superior se genera como la función `main` (nivel 0); sus
-  variables viven en el área global, por lo que su marco solo tiene encabezado y
-  temporales.
+  variables viven en el área global y nadie la llama, así que no tiene
+  encabezado.
 * `level` es la profundidad léxica: `main` = 0, función global = 1, función
   anidada = 2, …
 * El número de temporales se conoce al terminar de generar la función: el
@@ -129,13 +144,15 @@ frame_size = 12 + parámetros + locales (alineado a 8) + 8·temporales
 Volcado de ejemplo (`SymbolTable.format_runtime()`):
 
 ```
-Registro de activación fact (nivel 1, static link -> main) frame_size = 24
-  fp[+12]        param n: integer (4 B)
-  fp[+8]         static link -> main (4 B)
+Registro de activación fact (nivel 1) frame_size = 12
+  fp[+8]         param n: integer (4 B)
   fp[+4]         dirección de retorno (4 B)
   fp[+0]         control link (fp anterior) (4 B)
-  fp[-4]         local r: integer (4 B)
-  fp[-8]         local k: integer (4 B)
+
+Registro de activación externa_media (nivel 2, static link -> externa) frame_size = 12
+  fp[+8]         static link -> externa (4 B)
+  fp[+4]         dirección de retorno (4 B)
+  fp[+0]         control link (fp anterior) (4 B)
 ```
 
 ### 4.4 Etiquetas
@@ -180,7 +197,7 @@ param an
 t1 = call f, n        # o `call f, n` si es void
 ```
 
-* El parámetro `i` queda en `fp[+12 + offset_i]` del marco del llamado.
+* El parámetro `i` queda en `fp[+encabezado + offset_i]` del marco del llamado.
 * **Static link:** lo establece la secuencia de llamada. Si el llamador está en
   el nivel `p` y el llamado en el nivel `q` (`q ≤ p + 1`), se siguen `p - q + 1`
   enlaces estáticos desde el marco del llamador. No hay instrucción explícita:
@@ -391,12 +408,12 @@ tiempo de ejecución (capturable con try/catch).
 con los mismos offsets que en la clase padre, y luego los propios.
 
 ```
-Clase Perro : Animal  object_size = 24
+Clase Perro : Animal  object_size = 20
   [obj + 0  ] vtable
   [obj + 4  ] nombre (4 B) (heredado)
   [obj + 8  ] edad (4 B) (heredado)
   [obj + 12 ] raza (4 B)
-  [obj + 16 ] peso (8 B)
+  [obj + 16 ] peso (4 B)
   vtable[0] hablar -> Perro_hablar      # sobreescribe Animal_hablar en la misma ranura
   vtable[1] info -> Animal_info
 ```
@@ -404,7 +421,7 @@ Clase Perro : Animal  object_size = 24
 **Creación** (`new` + llamada directa al constructor, propio o heredado):
 
 ```
-let p: Perro = new Perro("Fido");   t1 = new Perro, 24
+let p: Perro = new Perro("Fido");   t1 = new Perro, 20
                                     param t1                 # this
                                     param "Fido"
                                     call Animal_constructor, 2
@@ -437,7 +454,7 @@ llama de forma directa.
 ### 7.14 Funciones, recursión y closures
 
 ```
-function fact(n: integer): integer {     func_begin fact, 24
+function fact(n: integer): integer {     func_begin fact, 16
   if (n <= 1) { return 1; }                if n > 1 goto L1
   return n * fact(n - 1);                  return 1
 }                                        L1:
@@ -458,7 +475,7 @@ contiene, así que no hace falta copiar las capturas al heap.
 
 ```
 function externa(n: integer): integer {
-  function interna(): integer { return n + 1; }     # n: fp^1[+12]
+  function interna(): integer { return n + 1; }     # n: fp^1[+8]
   return interna();
 }
 ```

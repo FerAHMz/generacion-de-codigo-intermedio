@@ -59,7 +59,7 @@ def gen(src):
 def test_programa_vacio_genera_main():
     res = compile_source("")
     assert res.ok
-    assert res.tac_lines() == ["func_begin main, 12", "func_end main"]
+    assert res.tac_lines() == ["func_begin main, 0", "func_end main"]
     assert res.program.check() == []
 
 
@@ -80,7 +80,7 @@ def test_error_sintactico_no_genera_tac():
 
 def test_emision_y_variables_con_direccion():
     prog = gen("let a: integer = 1; print(a); print(7);").generate()
-    assert [str(q) for q in prog] == ["func_begin main, 12", "print a", "print 7", "func_end main"]
+    assert [str(q) for q in prog] == ["func_begin main, 0", "print a", "print 7", "func_end main"]
     assert prog[1].arg1 == Var("a", "global[0]")
 
 
@@ -88,7 +88,7 @@ def test_while_break_y_etiquetas_balanceadas():
     prog = gen("while (true) { print(1); break; }").generate()
     assert prog.check() == []
     text = [str(q) for q in prog]
-    assert text == ["func_begin main, 12", "L1:", "ifFalse true goto L2", "print 1",
+    assert text == ["func_begin main, 0", "L1:", "ifFalse true goto L2", "print 1",
                     "goto L2", "goto L1", "L2:", "func_end main"]
 
 
@@ -101,8 +101,8 @@ def test_funciones_en_bufer_propio_con_frame_size_final():
     f_ar = g.table.record_of("f")
     assert f_ar.temp_count == 1                         # usó t1
     begin_f = next(q for q in prog if q.op == Op.FUNC_BEGIN and str(q.arg1) == "f")
-    assert begin_f.arg2 == Const(f_ar.frame_size) == Const(12 + 4 + 8)
-    assert [str(q) for q in prog][-4:] == ["func_begin h, 20", "t1 = 1", "print 2", "func_end h"]
+    assert begin_f.arg2 == Const(f_ar.frame_size) == Const(4 + 4 + 4)
+    assert [str(q) for q in prog][-4:] == ["func_begin h, 8", "t1 = 1", "print 2", "func_end h"]
 
 
 def test_temporales_y_emit_binary_reciclan():
@@ -171,7 +171,7 @@ def test_var_de_closure_lleva_hops():
     h = g.table.record_of("f_h")
     with g.function(h):
         v = g.var(n)
-        assert v.hops == 1 and v.location == "fp^1[+12]"
+        assert v.hops == 1 and v.location == "fp^1[+4]"
 
 
 def test_contrato_de_mixins_pendiente():
