@@ -33,7 +33,8 @@ class DeclarationsMixin:
             kind = SymbolKind.FIELD if kind == SymbolKind.VARIABLE else kind
         sym = Symbol(name, kind, final, ident.getSymbol().line, ident.getSymbol().column,
                      initialized=init_ctx is not None)
-        self.declare(sym, ident, "constante" if kind == SymbolKind.CONSTANT else "variable")
+        if self.declare(sym, ident, "constante" if kind == SymbolKind.CONSTANT else "variable"):
+            self.bind(ctx, sym)
 
     def _infer(self, ident, name: str, value: Type) -> Type:
         if value == ArrayType(NULL):
@@ -63,7 +64,7 @@ class DeclarationsMixin:
             # Identifier '=' expression ';'
             name = ctx.Identifier().getText()
             value = self.type_of(exprs[0])
-            sym = self.table.resolve(name)
+            sym = self.bind(ctx, self.table.resolve(name))
             if sym is None:
                 return self.error(ctx.Identifier(), f"la variable '{name}' no ha sido declarada")
             self._note_capture(sym)
@@ -71,7 +72,7 @@ class DeclarationsMixin:
         # expression '.' Identifier '=' expression ';'
         value = self.type_of(exprs[1])
         obj_t = self.type_of(exprs[0])
-        member = self._lookup_member(ctx.Identifier(), obj_t)
+        member = self.bind(ctx, self._lookup_member(ctx.Identifier(), obj_t))
         if member is None:
             return ERROR
         return self._check_assignment(ctx, member.type, member, value)

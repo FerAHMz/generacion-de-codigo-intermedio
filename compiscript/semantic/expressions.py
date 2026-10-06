@@ -173,7 +173,7 @@ class ExpressionsMixin:
     def visitPropertyAssignExpr(self, ctx: P.PropertyAssignExprContext):
         value = self.type_of(ctx.assignmentExpr())
         obj_t, _ = self._walk_lhs(ctx.lhs)
-        member = self._lookup_member(ctx.Identifier(), obj_t)
+        member = self.bind(ctx, self._lookup_member(ctx.Identifier(), obj_t))
         if member is None:
             return ERROR
         return self._check_assignment(ctx, member.type, member, value)
@@ -224,7 +224,7 @@ class ExpressionsMixin:
             elif isinstance(suffix, P.IndexExprContext):
                 t, sym = self._index(suffix, t), None
             else:  # PropertyAccessExpr
-                member = self._lookup_member(suffix.Identifier(), t)
+                member = self.bind(suffix, self._lookup_member(suffix.Identifier(), t))
                 t, sym = (member.type, member) if member else (ERROR, None)
             self.record(suffix, t)
         return self.record(ctx, t), sym
@@ -238,7 +238,7 @@ class ExpressionsMixin:
 
     def _identifier(self, atom: P.IdentifierExprContext) -> Tuple[Type, Optional[Symbol]]:
         name = atom.Identifier().getText()
-        sym = self.table.resolve(name)
+        sym = self.bind(atom, self.table.resolve(name))
         if sym is None:
             return self.error(atom, f"la variable '{name}' no ha sido declarada"), None
         self._note_capture(sym)
@@ -271,7 +271,7 @@ class ExpressionsMixin:
     def visitNewExpr(self, ctx: P.NewExprContext):
         name = ctx.Identifier().getText()
         args = self._arguments(ctx.arguments())
-        cls = self.classes.get(name)
+        cls = self.bind(ctx, self.classes.get(name))
         if cls is None:
             return self.error(ctx, f"la clase '{name}' no está definida")
         ctor = cls.constructor()

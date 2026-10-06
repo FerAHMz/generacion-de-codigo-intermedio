@@ -47,7 +47,7 @@ class ClassesMixin:
                 sym.parent = parent
                 sym.class_type.parent = parent.class_type
 
-        with self.scoped(ScopeKind.CLASS, owner=sym) as scope:
+        with self.scoped(ScopeKind.CLASS, owner=sym, ctx=ctx) as scope:
             sym.members = scope
             members = ctx.classMember()
             # 1) firmas de métodos primero: un método puede llamar a otro declarado después.

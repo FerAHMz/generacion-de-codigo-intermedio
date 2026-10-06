@@ -20,7 +20,7 @@ from antlr4.tree.Tree import TerminalNode
 from ..errors import ErrorCollector
 from ..generated.CompiscriptParser import CompiscriptParser
 from ..generated.CompiscriptVisitor import CompiscriptVisitor
-from ..symbols import ClassSymbol, ScopeKind, Symbol, SymbolKind, SymbolTable
+from ..symbols import ClassSymbol, Scope, ScopeKind, Symbol, SymbolKind, SymbolTable
 from ..types import ArrayType, ClassType, ERROR, PRIMITIVES, Type
 
 P = CompiscriptParser
@@ -40,6 +40,10 @@ class BaseAnalyzer(CompiscriptVisitor):
         self.node_types: Dict[ParserRuleContext, Type] = {}
         # Símbolo de función asociado a cada declaración (pre-declaración/hoisting).
         self.declared_functions: Dict[ParserRuleContext, Symbol] = {}
+        # Interfaz con la generación de código (segunda pasada): símbolo al que
+        # resuelve cada identificador/declaración y entorno que abre cada nodo.
+        self.node_symbols: Dict[object, Symbol] = {}
+        self.node_scopes: Dict[ParserRuleContext, Scope] = {}
 
     # ------------------------------------------------------------------ errores
 
@@ -97,9 +101,19 @@ class BaseAnalyzer(CompiscriptVisitor):
 
     # ---------------------------------------------------------------- entornos
 
-    def scoped(self, kind: str, owner: Optional[Symbol] = None, name: Optional[str] = None):
-        """Context manager: `with self.scoped(ScopeKind.BLOCK): ...`"""
-        return _ScopeGuard(self.table, kind, owner, name)
+    def scoped(self, kind: str, owner: Optional[Symbol] = None, name: Optional[str] = None,
+               ctx: Optional[ParserRuleContext] = None):
+        """Context manager: `with self.scoped(ScopeKind.BLOCK, ctx=ctx): ...`
+
+        Si se pasa `ctx`, el entorno creado queda registrado en `node_scopes[ctx]`
+        para que el generador de código lo recupere sin volver a resolver nombres."""
+        return _ScopeGuard(self.table, kind, owner, name, ctx, self.node_scopes)
+
+    def bind(self, node, sym: Optional[Symbol]) -> Optional[Symbol]:
+        """Asocia un nodo del árbol con el símbolo al que resuelve."""
+        if sym is not None:
+            self.node_symbols[node] = sym
+        return sym
 
     def declare(self, sym: Symbol, ctx, what: Optional[str] = None) -> bool:
         """Define `sym` en el entorno actual, reportando redeclaraciones."""
@@ -143,7 +157,7 @@ class BaseAnalyzer(CompiscriptVisitor):
 
     # Los bloques crean su propio entorno.
     def visitBlock(self, ctx: P.BlockContext):
-        with self.scoped(ScopeKind.BLOCK):
+        with self.scoped(ScopeKind.BLOCK, ctx=ctx):
             self.visit_statements(ctx.statement())
 
     def visitProgram(self, ctx: P.ProgramContext):
@@ -156,12 +170,15 @@ class BaseAnalyzer(CompiscriptVisitor):
 
 
 class _ScopeGuard:
-    def __init__(self, table: SymbolTable, kind, owner, name):
+    def __init__(self, table: SymbolTable, kind, owner, name, ctx=None, registry=None):
         self.table, self.kind, self.owner, self.name = table, kind, owner, name
+        self.ctx, self.registry = ctx, registry
         self.scope = None
 
     def __enter__(self):
         self.scope = self.table.push(self.kind, self.owner, self.name)
+        if self.ctx is not None and self.registry is not None:
+            self.registry[self.ctx] = self.scope
         return self.scope
 
     def __exit__(self, *exc):

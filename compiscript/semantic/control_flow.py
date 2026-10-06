@@ -17,7 +17,7 @@ class ControlFlowMixin:
 
     def _loop_body(self, block_ctx) -> None:
         """Cuerpo de un bucle: entorno LOOP (habilita break/continue)."""
-        with self.scoped(ScopeKind.LOOP):
+        with self.scoped(ScopeKind.LOOP, ctx=block_ctx):
             self.visit_statements(block_ctx.statement())
 
     # ------------------------------------------------------------ condicionales
@@ -40,7 +40,7 @@ class ControlFlowMixin:
     def visitForStatement(self, ctx: P.ForStatementContext):
         # for '(' (variableDeclaration | assignment | ';') expression? ';' expression? ')' block
         # Se localizan condición y actualización por posición respecto a los ';'.
-        with self.scoped(ScopeKind.LOOP, name="for"):
+        with self.scoped(ScopeKind.LOOP, name="for", ctx=ctx):
             children = list(ctx.getChildren())
             i = 2  # después de 'for' '('
             init = children[i]
@@ -66,25 +66,27 @@ class ControlFlowMixin:
             elem = self.error(ctx.expression(), f"'foreach' requiere iterar un arreglo, no un valor de tipo {iterable}")
         else:
             elem = iterable.element
-        with self.scoped(ScopeKind.LOOP, name="foreach") as scope:
-            scope.define(Symbol(ident.getText(), SymbolKind.VARIABLE, elem,
-                                ident.getSymbol().line, ident.getSymbol().column, initialized=True))
+        with self.scoped(ScopeKind.LOOP, name="foreach", ctx=ctx) as scope:
+            var = Symbol(ident.getText(), SymbolKind.VARIABLE, elem,
+                         ident.getSymbol().line, ident.getSymbol().column, initialized=True)
+            scope.define(var)
+            self.bind(ident, var)
             self.visit_statements(ctx.block().statement())
 
     # ----------------------------------------------------------------- switch
 
     def visitSwitchStatement(self, ctx: P.SwitchStatementContext):
         subject = self.type_of(ctx.expression())
-        with self.scoped(ScopeKind.SWITCH):
+        with self.scoped(ScopeKind.SWITCH, ctx=ctx):
             for case in ctx.switchCase():
                 case_t = self.type_of(case.expression())
                 if not is_error(subject) and not is_error(case_t) and not are_comparable(subject, case_t):
                     self.error(case.expression(), f"el 'case' de tipo {case_t} no es comparable con el "
                                                   f"valor del switch de tipo {subject}")
-                with self.scoped(ScopeKind.BLOCK, name="case"):
+                with self.scoped(ScopeKind.BLOCK, name="case", ctx=case):
                     self.visit_statements(case.statement())
             if ctx.defaultCase():
-                with self.scoped(ScopeKind.BLOCK, name="default"):
+                with self.scoped(ScopeKind.BLOCK, name="default", ctx=ctx.defaultCase()):
                     self.visit_statements(ctx.defaultCase().statement())
 
     # -------------------------------------------------------------- try/catch
@@ -92,10 +94,12 @@ class ControlFlowMixin:
     def visitTryCatchStatement(self, ctx: P.TryCatchStatementContext):
         self.visit(ctx.block(0))
         ident = ctx.Identifier()
-        with self.scoped(ScopeKind.BLOCK, name="catch") as scope:
+        with self.scoped(ScopeKind.BLOCK, name="catch", ctx=ctx) as scope:
             # El error capturado se modela como string (mensaje).
-            scope.define(Symbol(ident.getText(), SymbolKind.VARIABLE, STRING,
-                                ident.getSymbol().line, ident.getSymbol().column, initialized=True))
+            var = Symbol(ident.getText(), SymbolKind.VARIABLE, STRING,
+                         ident.getSymbol().line, ident.getSymbol().column, initialized=True)
+            scope.define(var)
+            self.bind(ident, var)
             self.visit_statements(ctx.block(1).statement())
 
     # -------------------------------------------------------- break / continue

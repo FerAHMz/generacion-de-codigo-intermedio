@@ -56,7 +56,7 @@ class FunctionsMixin:
         if sym is None:  # no fue pre-declarada (p. ej. anidada en un lugar inesperado)
             sym = self._declare_function(ctx, SymbolKind.FUNCTION)
 
-        with self.scoped(ScopeKind.FUNCTION, owner=sym) as scope:
+        with self.scoped(ScopeKind.FUNCTION, owner=sym, ctx=ctx) as scope:
             sym.body_scope = scope
             for p in sym.params:
                 scope.define(p)   # duplicados ya reportados en la firma

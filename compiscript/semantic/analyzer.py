@@ -2,14 +2,14 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Dict, Optional
 
 from antlr4 import ParserRuleContext
 
 from ..errors import ErrorCollector
 from ..parsing import ParseResult, parse_file, parse_source
-from ..symbols import SymbolTable
+from ..symbols import Scope, Symbol, SymbolTable
 from ..types import Type
 from .base import BaseAnalyzer
 from .classes import ClassesMixin
@@ -29,6 +29,9 @@ class AnalysisResult:
     table: SymbolTable
     errors: ErrorCollector
     node_types: Dict[ParserRuleContext, Type]
+    # Anotaciones para la segunda pasada (generación de código intermedio).
+    node_symbols: Dict[object, Symbol] = field(default_factory=dict)
+    node_scopes: Dict[ParserRuleContext, Scope] = field(default_factory=dict)
 
     @property
     def tree(self):
@@ -47,7 +50,8 @@ def analyze(source: str, errors: Optional[ErrorCollector] = None) -> AnalysisRes
     analyzer = SemanticAnalyzer(errors)
     if parsed.ok:
         analyzer.visit(parsed.tree)
-    return AnalysisResult(parsed, analyzer.table, errors, analyzer.node_types)
+    return AnalysisResult(parsed, analyzer.table, errors, analyzer.node_types,
+                          analyzer.node_symbols, analyzer.node_scopes)
 
 
 def analyze_file(path: str, errors: Optional[ErrorCollector] = None) -> AnalysisResult:
