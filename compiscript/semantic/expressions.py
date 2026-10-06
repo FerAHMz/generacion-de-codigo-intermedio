@@ -258,6 +258,13 @@ class ExpressionsMixin:
             if sym not in current_fn.captures:
                 current_fn.captures.append(sym)
 
+    def _note_call(self, callee: FunctionSymbol) -> None:
+        """Registra que la función actual llama a `callee` (grafo de llamadas que
+        usa la tabla para decidir qué marcos necesitan static link y $ra)."""
+        current_fn = self.table.current.enclosing_function()
+        if current_fn is not None and all(c is not callee for c in current_fn.calls):
+            current_fn.calls.append(callee)
+
     def visitIdentifierExpr(self, ctx: P.IdentifierExprContext):
         return self._identifier(ctx)[0]
 
@@ -280,6 +287,7 @@ class ExpressionsMixin:
                 self.error(ctx, f"la clase '{name}' no define constructor, pero se le pasaron {len(args)} argumentos")
         else:
             self._check_arguments(ctx, f"constructor de '{name}'", ctor, args)
+            self._note_call(ctor)
         return self.record(ctx, cls.class_type)
 
     # ---------------------------------------------------------------- llamadas
@@ -303,6 +311,7 @@ class ExpressionsMixin:
             return ERROR
         if isinstance(callee, FunctionSymbol):
             self._check_arguments(suffix, f"'{callee.name}'", callee, args)
+            self._note_call(callee)
             return callee.return_type
         if isinstance(callee_t, FunctionType):
             if len(args) != len(callee_t.params):
