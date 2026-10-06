@@ -50,6 +50,8 @@ def analyze(source: str, errors: Optional[ErrorCollector] = None) -> AnalysisRes
     analyzer = SemanticAnalyzer(errors)
     if parsed.ok:
         analyzer.visit(parsed.tree)
+        # Direcciones, registros de activación y layouts para la generación de código.
+        analyzer.table.allocate_storage()
     return AnalysisResult(parsed, analyzer.table, errors, analyzer.node_types,
                           analyzer.node_symbols, analyzer.node_scopes)
 

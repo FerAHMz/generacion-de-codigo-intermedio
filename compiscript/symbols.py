@@ -5,14 +5,48 @@ Diseñada para servir a esta fase (análisis semántico) y a las siguientes
 posición en el fuente, tamaño y desplazamiento dentro de su entorno, y cada
 entorno conoce a su padre, a sus hijos y al símbolo que lo "posee"
 (la función o clase que lo creó).
+
+Para la generación de código intermedio la tabla se completa, después del
+análisis semántico, con `SymbolTable.allocate_storage()`:
+  * tamaño en bytes de cada símbolo según su tipo (`sizeof`),
+  * dirección en tiempo de ejecución (`global[off]`, `fp[+off]`, `fp[-off]`,
+    `this[+off]`),
+  * etiqueta de cada función/método (`fact`, `Perro_hablar`),
+  * un `ActivationRecord` por función (y uno para el código global, `main`),
+  * un `ClassLayout` por clase (atributos heredados primero + vtable).
 """
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
-from typing import Dict, Iterator, List, Optional
+from typing import Dict, Iterator, List, Optional, Tuple
 
-from .types import ClassType, FunctionType, Type, VOID
+from .types import BOOLEAN, ClassType, FLOAT, FunctionType, Type, VOID
+
+
+# ---------------------------------------------------------------------------
+# Tamaños en bytes
+# ---------------------------------------------------------------------------
+
+WORD = 4            # enteros, referencias (string, arreglos, objetos) y punteros
+TEMP_SLOT = 8       # cada temporal ocupa una ranura capaz de guardar un float
+HEADER_SIZE = 3 * WORD   # control link + dirección de retorno + static link
+
+
+def sizeof(t: Optional[Type]) -> int:
+    """Bytes que ocupa un valor de tipo `t` en memoria.
+    integer: 4, float: 8, boolean: 1; string, arreglos y objetos son
+    referencias de 4 bytes (el contenido vive en el heap)."""
+    if t == FLOAT:
+        return 8
+    if t == BOOLEAN:
+        return 1
+    return WORD
+
+
+def align(n: int, a: int) -> int:
+    return (n + a - 1) // a * a
 
 
 # ---------------------------------------------------------------------------
@@ -40,10 +74,27 @@ class Symbol:
     initialized: bool = False
     offset: int = 0                       # desplazamiento dentro del entorno
     captured: bool = False                # variable capturada por un closure
+    # --- tiempo de ejecución (lo llena SymbolTable.allocate_storage) ---------
+    storage: Optional[str] = None         # Storage.GLOBAL / PARAM / LOCAL / FIELD
+    frame_offset: Optional[int] = None    # con signo: + parámetros, - locales
+    label: Optional[str] = None           # funciones, métodos y clases
 
     @property
     def size(self) -> int:
-        return getattr(self.type, "size", 1)
+        return sizeof(self.type)
+
+    @property
+    def address(self) -> Optional[str]:
+        """`global[off]`, `fp[+off]` (parámetro), `fp[-off]` (local) o
+        `this[+off]` (atributo). None si el símbolo no ocupa memoria."""
+        if self.storage is None or self.frame_offset is None:
+            return None
+        off = self.frame_offset
+        if self.storage == Storage.GLOBAL:
+            return f"global[{off}]"
+        if self.storage == Storage.FIELD:
+            return f"this[+{off}]"
+        return f"fp[{'+' if off >= 0 else '-'}{abs(off)}]"
 
     @property
     def is_callable(self) -> bool:
@@ -60,6 +111,8 @@ class FunctionSymbol(Symbol):
     body_scope: Optional["Scope"] = None
     captures: List[Symbol] = field(default_factory=list)   # closures
     has_return: bool = False
+    activation: Optional["ActivationRecord"] = None
+    owner_class: Optional["ClassSymbol"] = None            # métodos
 
     def __post_init__(self):
         if not isinstance(self.type, FunctionType):
@@ -77,6 +130,11 @@ class FunctionSymbol(Symbol):
 class ClassSymbol(Symbol):
     parent: Optional["ClassSymbol"] = None
     members: Optional["Scope"] = None
+    layout: Optional["ClassLayout"] = None
+
+    @property
+    def object_size(self) -> int:
+        return self.layout.object_size if self.layout else 0
 
     @property
     def class_type(self) -> ClassType:
@@ -216,6 +274,165 @@ class Scope:
 
 
 # ---------------------------------------------------------------------------
+# Entornos de ejecución: registros de activación y layout de objetos
+# ---------------------------------------------------------------------------
+
+class Storage:
+    GLOBAL = "global"   # área estática: variables del código de nivel superior
+    PARAM = "param"     # parámetro: fp[+off]
+    LOCAL = "local"     # local de la función (bloques anidados aplanados): fp[-off]
+    FIELD = "field"     # atributo de objeto: [obj + off]
+
+
+_DATA_KINDS = (SymbolKind.VARIABLE, SymbolKind.CONSTANT, SymbolKind.PARAMETER, SymbolKind.FIELD)
+
+
+@dataclass
+class ActivationRecord:
+    """Marco de una función en la pila. Direcciones relativas a `fp`:
+
+        fp + 12 + ...   parámetros (el 0 es `this` en los métodos)
+        fp + 8          static link   (marco de la función que la contiene léxicamente)
+        fp + 4          dirección de retorno
+        fp + 0          control link  (fp del llamador)
+        fp - 1 ...      locales (incluye los de bloques anidados, aplanados)
+        ...             temporales (TEMP_SLOT bytes cada uno)
+
+    `frame_size` = encabezado + parámetros + locales + temporales.
+    `level` es la profundidad de anidamiento léxico (main = 0, función
+    global = 1, anidada = 2, ...): para leer una variable capturada se siguen
+    `nivel_actual - nivel_dueño` enlaces estáticos.
+    """
+
+    CONTROL_LINK = 0
+    RETURN_ADDRESS = WORD
+    STATIC_LINK = 2 * WORD
+    PARAMS_BASE = HEADER_SIZE
+
+    name: str
+    label: str
+    level: int
+    function: Optional[FunctionSymbol] = None
+    parent: Optional["ActivationRecord"] = None     # destino del static link
+    this: Optional[Symbol] = None
+    params: List[Symbol] = field(default_factory=list)
+    locals: List[Symbol] = field(default_factory=list)
+    params_size: int = 0
+    locals_size: int = 0
+    temp_count: int = 0
+
+    # --- construcción -------------------------------------------------------------
+
+    def add_param(self, sym: Symbol) -> None:
+        off = align(self.PARAMS_BASE + self.params_size, min(sym.size, WORD))
+        sym.storage, sym.frame_offset = Storage.PARAM, off
+        self.params_size = off + sym.size - self.PARAMS_BASE
+        self.params.append(sym)
+
+    def add_local(self, sym: Symbol) -> None:
+        end = align(self.locals_size + sym.size, sym.size)
+        sym.storage, sym.frame_offset = Storage.LOCAL, -end
+        self.locals_size = end
+        self.locals.append(sym)
+
+    def set_temps(self, count: int) -> None:
+        """Lo llama el generador al cerrar la función con `TempAllocator.max_live`."""
+        self.temp_count = count
+
+    # --- consultas ----------------------------------------------------------------
+
+    @property
+    def temps_base(self) -> int:
+        return align(self.locals_size, TEMP_SLOT)
+
+    def temp_address(self, index: int) -> str:
+        """Dirección de la ranura del temporal t{index} (1-based)."""
+        return f"fp[-{self.temps_base + index * TEMP_SLOT}]"
+
+    @property
+    def temps_size(self) -> int:
+        return self.temp_count * TEMP_SLOT
+
+    @property
+    def frame_size(self) -> int:
+        return HEADER_SIZE + self.params_size + self.temps_base + self.temps_size
+
+    def slots(self) -> List[dict]:
+        """Contenido del marco, de direcciones altas a bajas (para el volcado)."""
+        out = [{"address": p.address, "content": f"param {p.name}: {p.type}", "size": p.size}
+               for p in reversed(self.params)]
+        out += [
+            {"address": f"fp[+{self.STATIC_LINK}]", "content": "static link"
+                + (f" -> {self.parent.label}" if self.parent else ""), "size": WORD},
+            {"address": f"fp[+{self.RETURN_ADDRESS}]", "content": "dirección de retorno", "size": WORD},
+            {"address": f"fp[+{self.CONTROL_LINK}]", "content": "control link (fp anterior)", "size": WORD},
+        ]
+        out += [{"address": s.address, "content": f"local {s.name}: {s.type}", "size": s.size}
+                for s in self.locals]
+        out += [{"address": self.temp_address(i), "content": f"temporal t{i}", "size": TEMP_SLOT}
+                for i in range(1, self.temp_count + 1)]
+        return out
+
+    def to_dict(self) -> dict:
+        return {
+            "name": self.name, "label": self.label, "level": self.level,
+            "static_link": self.parent.label if self.parent else None,
+            "params_size": self.params_size, "locals_size": self.locals_size,
+            "temps": self.temp_count, "frame_size": self.frame_size,
+            "slots": self.slots(),
+        }
+
+
+@dataclass
+class ClassLayout:
+    """Distribución de un objeto en el heap:
+
+        [obj + 0]   puntero a la tabla de métodos (vtable) de su clase
+        [obj + 4]   atributos heredados (mismos offsets que en la clase padre)
+        ...         atributos propios
+
+    `vtable` conserva el orden del padre; un método sobreescrito reemplaza
+    la etiqueta en la MISMA ranura, por lo que `method_slot` es válido para
+    cualquier subclase (despacho dinámico). El constructor no va en la vtable:
+    se llama de forma directa después de `new`.
+    """
+
+    VTABLE_OFFSET = 0
+
+    name: str
+    parent: Optional["ClassLayout"] = None
+    fields: List[Tuple[str, int, int, str]] = field(default_factory=list)  # nombre, offset, tamaño, clase dueña
+    vtable: List[Tuple[str, str]] = field(default_factory=list)            # (método, etiqueta)
+    object_size: int = WORD
+    constructor_label: Optional[str] = None
+
+    def field_offset(self, name: str) -> Optional[int]:
+        for fname, off, _, _ in self.fields:
+            if fname == name:
+                return off
+        return None
+
+    def method_slot(self, name: str) -> Optional[int]:
+        for i, (mname, _) in enumerate(self.vtable):
+            if mname == name:
+                return i
+        return None
+
+    def method_label(self, name: str) -> Optional[str]:
+        slot = self.method_slot(name)
+        return self.vtable[slot][1] if slot is not None else None
+
+    def to_dict(self) -> dict:
+        return {
+            "name": self.name, "parent": self.parent.name if self.parent else None,
+            "object_size": self.object_size, "constructor": self.constructor_label,
+            "fields": [{"name": n, "offset": o, "size": sz, "declared_in": c}
+                       for n, o, sz, c in self.fields],
+            "vtable": [{"slot": i, "method": m, "label": lab} for i, (m, lab) in enumerate(self.vtable)],
+        }
+
+
+# ---------------------------------------------------------------------------
 # Tabla de símbolos
 # ---------------------------------------------------------------------------
 
@@ -227,6 +444,12 @@ class SymbolTable:
         self.global_scope = Scope(ScopeKind.GLOBAL, name="global")
         self.current = self.global_scope
         self.scopes: List[Scope] = [self.global_scope]
+        # --- entornos de ejecución (allocate_storage) ---
+        self.main: Optional[ActivationRecord] = None
+        self.activation_records: List[ActivationRecord] = []
+        self.class_layouts: Dict[str, ClassLayout] = {}
+        self.globals_size = 0
+        self._owner: Dict[int, ActivationRecord] = {}   # id(símbolo) -> marco dueño
 
     # --- navegación ---------------------------------------------------------------
 
@@ -255,6 +478,146 @@ class SymbolTable:
     def resolve_local(self, name: str) -> Optional[Symbol]:
         return self.current.resolve_local(name)
 
+    # --- entornos de ejecución ---------------------------------------------------
+
+    def allocate_storage(self) -> "SymbolTable":
+        """Asigna direcciones, etiquetas, registros de activación y layouts.
+
+        Se ejecuta una vez terminada la pasada semántica (todos los entornos
+        ya existen). Es idempotente y tolera programas con errores (los tipos
+        ERROR ocupan una palabra), para que el IDE siempre pueda mostrarla.
+        """
+        if self.main is not None:
+            return self
+        used_labels = {"main"}
+        self.main = ActivationRecord("main", "main", level=0)
+        self.activation_records = [self.main]
+
+        def unique(base: str) -> str:
+            label, k = base, 1
+            while label in used_labels:
+                k += 1
+                label = f"{base}_{k}"
+            used_labels.add(label)
+            return label
+
+        def function_scope(scope: Scope) -> Optional[Scope]:
+            """Entorno FUNCTION más cercano (sin cruzar una clase)."""
+            for s in scope.ancestors():
+                if s.kind == ScopeKind.FUNCTION:
+                    return s
+                if s.kind == ScopeKind.CLASS:
+                    return None
+            return None
+
+        # 1) etiquetas de funciones, métodos y clases (en orden del fuente).
+        for scope in self.scopes:
+            for sym in scope.symbols.values():
+                if isinstance(sym, ClassSymbol):
+                    sym.label = unique(sym.name)
+                elif isinstance(sym, FunctionSymbol):
+                    if scope.kind == ScopeKind.CLASS and isinstance(scope.owner, ClassSymbol):
+                        sym.owner_class = scope.owner
+                        sym.label = unique(f"{scope.owner.name}_{sym.name}")
+                    else:
+                        outer = scope.enclosing_function()
+                        prefix = f"{outer.label}_" if outer is not None and outer.label else ""
+                        sym.label = unique(prefix + sym.name)
+
+        # 2) variables globales y un registro de activación por función.
+        records: Dict[int, ActivationRecord] = {}
+        for scope in self.scopes:
+            if scope.kind == ScopeKind.FUNCTION and isinstance(scope.owner, FunctionSymbol):
+                fn = scope.owner
+                outer_scope = function_scope(scope.parent) if scope.parent else None
+                parent = records.get(outer_scope.id) if outer_scope else self.main
+                ar = ActivationRecord(fn.name, fn.label or fn.name, level=parent.level + 1,
+                                      function=fn, parent=parent)
+                if fn.owner_class is not None:
+                    ar.this = Symbol("this", SymbolKind.PARAMETER, fn.owner_class.type,
+                                     fn.line, fn.column, scope=scope, initialized=True)
+                    ar.add_param(ar.this)
+                    self._owner[id(ar.this)] = ar
+                for prm in fn.params:
+                    ar.add_param(prm)
+                    self._owner[id(prm)] = ar
+                fn.activation = ar
+                records[scope.id] = ar
+                self.activation_records.append(ar)
+
+            if scope.kind == ScopeKind.CLASS:
+                continue   # los atributos se ubican en el layout del objeto
+            fscope = function_scope(scope)
+            for sym in scope.symbols.values():
+                if sym.kind not in _DATA_KINDS or sym.kind == SymbolKind.PARAMETER:
+                    continue
+                if fscope is None:
+                    off = align(self.globals_size, sym.size)
+                    sym.storage, sym.frame_offset = Storage.GLOBAL, off
+                    self.globals_size = off + sym.size
+                    self._owner[id(sym)] = self.main
+                else:
+                    ar = records[fscope.id]
+                    ar.add_local(sym)
+                    self._owner[id(sym)] = ar
+
+        # 3) layout de cada clase (el padre primero).
+        for scope in self.scopes:
+            for sym in scope.symbols.values():
+                if isinstance(sym, ClassSymbol):
+                    self._layout(sym)
+        return self
+
+    def _layout(self, cls: ClassSymbol) -> ClassLayout:
+        if cls.layout is not None:
+            return cls.layout
+        parent = self._layout(cls.parent) if cls.parent is not None else None
+        lay = ClassLayout(cls.name, parent)
+        if parent is not None:
+            lay.fields = list(parent.fields)
+            lay.vtable = list(parent.vtable)
+            lay.object_size = parent.object_size
+            lay.constructor_label = parent.constructor_label
+        cursor = lay.object_size
+        members = cls.members.symbols.values() if cls.members else []
+        for sym in members:
+            if sym.kind in (SymbolKind.FIELD, SymbolKind.CONSTANT):
+                off = align(cursor, sym.size)
+                sym.storage, sym.frame_offset = Storage.FIELD, off
+                lay.fields.append((sym.name, off, sym.size, cls.name))
+                cursor = off + sym.size
+            elif isinstance(sym, FunctionSymbol):
+                if sym.name == "constructor":
+                    lay.constructor_label = sym.label
+                    continue
+                slot = lay.method_slot(sym.name)
+                if slot is None:
+                    lay.vtable.append((sym.name, sym.label))
+                else:
+                    lay.vtable[slot] = (sym.name, sym.label)   # sobreescritura
+        lay.object_size = align(cursor, WORD)
+        cls.layout = lay
+        self.class_layouts[cls.name] = lay
+        return lay
+
+    def owner_record(self, sym: Symbol) -> Optional[ActivationRecord]:
+        """Registro de activación al que pertenece la variable/parámetro `sym`."""
+        return self._owner.get(id(sym))
+
+    def hops(self, sym: Symbol, current: ActivationRecord) -> int:
+        """Enlaces estáticos a seguir desde `current` para llegar a `sym`
+        (0 para globales y para variables del propio marco)."""
+        if sym.storage not in (Storage.PARAM, Storage.LOCAL):
+            return 0
+        owner = self.owner_record(sym)
+        return max(0, current.level - owner.level) if owner else 0
+
+    def record_of(self, label: str) -> Optional[ActivationRecord]:
+        for ar in self.activation_records:
+            if ar.label == label:
+                return ar
+        return None
+
     # --- reportes -----------------------------------------------------------------
 
     def rows(self) -> List[dict]:
@@ -275,6 +638,8 @@ class SymbolTable:
                     "offset": sym.offset,
                     "initialized": sym.initialized,
                     "captured": sym.captured,
+                    "address": sym.address or "",
+                    "label": sym.label or "",
                     "extra": "",
                 }
                 if isinstance(sym, FunctionSymbol):
@@ -290,9 +655,52 @@ class SymbolTable:
         rows = self.rows()
         if not rows:
             return "(tabla de símbolos vacía)"
-        headers = ["scope", "name", "kind", "type", "line", "offset", "size", "extra"]
+        headers = ["scope", "name", "kind", "type", "line", "size", "address", "label", "extra"]
         widths = {h: max(len(h), *(len(str(r[h])) for r in rows)) for h in headers}
         line = " | ".join(h.ljust(widths[h]) for h in headers)
         sep = "-+-".join("-" * widths[h] for h in headers)
         body = "\n".join(" | ".join(str(r[h]).ljust(widths[h]) for h in headers) for r in rows)
         return f"{line}\n{sep}\n{body}"
+
+    # --- volcado de entornos de ejecución -----------------------------------------
+
+    def to_dict(self) -> dict:
+        """Tabla completa para el IDE y la documentación (serializable a JSON)."""
+        self.allocate_storage()
+        return {
+            "symbols": self.rows(),
+            "globals_size": self.globals_size,
+            "activation_records": [ar.to_dict() for ar in self.activation_records],
+            "classes": [lay.to_dict() for lay in self.class_layouts.values()],
+        }
+
+    def to_json(self, indent: int = 2) -> str:
+        return json.dumps(self.to_dict(), ensure_ascii=False, indent=indent)
+
+    def format_runtime(self) -> str:
+        """Volcado de texto de registros de activación y layouts de clases."""
+        self.allocate_storage()
+        out = [f"Área global: {self.globals_size} bytes"]
+        for row in self.rows():
+            if row["address"].startswith("global"):
+                out.append(f"  {row['address']:<14} {row['name']}: {row['type']}")
+        for ar in self.activation_records:
+            link = f", static link -> {ar.parent.label}" if ar.parent else ""
+            out.append("")
+            out.append(f"Registro de activación {ar.label} (nivel {ar.level}{link}) "
+                       f"frame_size = {ar.frame_size}")
+            for slot in ar.slots():
+                out.append(f"  {slot['address']:<14} {slot['content']} ({slot['size']} B)")
+        for lay in self.class_layouts.values():
+            parent = f" : {lay.parent.name}" if lay.parent else ""
+            out.append("")
+            out.append(f"Clase {lay.name}{parent}  object_size = {lay.object_size}")
+            out.append(f"  [obj + {ClassLayout.VTABLE_OFFSET:<3}] vtable")
+            for name, off, size, owner in lay.fields:
+                inh = " (heredado)" if owner != lay.name else ""
+                out.append(f"  [obj + {off:<3}] {name} ({size} B){inh}")
+            for i, (m, lab) in enumerate(lay.vtable):
+                out.append(f"  vtable[{i}] {m} -> {lab}")
+            if lay.constructor_label:
+                out.append(f"  constructor -> {lay.constructor_label}")
+        return "\n".join(out)
