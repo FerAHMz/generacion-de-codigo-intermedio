@@ -142,6 +142,29 @@ def test_pila_break_continue_atraviesa_switch():
             g.continue_target()
 
 
+def test_saltos_que_salen_de_un_try_cierran_manejadores():
+    g = gen("")
+    with g.function(g.table.main):
+        fin, cont, catch = Label("Lfin"), Label("Lcont"), Label("Lcatch")
+        with g.breakable(fin, cont):
+            with g.handler(catch):
+                g.emit_jump_out("break")
+                with g.handler(catch):
+                    g.emit_jump_out("continue")
+                    g.emit_return(Const(1))
+        text = [str(q) for q in g.code][1:]
+    assert text == [
+        "push_handler Lcatch",
+        "pop_handler    # salida anticipada del try", "goto Lfin",
+        "push_handler Lcatch",
+        "pop_handler    # salida anticipada del try", "pop_handler    # salida anticipada del try",
+        "goto Lcont",
+        "pop_handler    # salida anticipada del try", "pop_handler    # salida anticipada del try",
+        "return 1",
+        "pop_handler", "pop_handler",
+    ]
+
+
 def test_var_de_closure_lleva_hops():
     g = gen("function f(n: integer) { function h() { print(n); } }")
     n = g.table.record_of("f").params[0]

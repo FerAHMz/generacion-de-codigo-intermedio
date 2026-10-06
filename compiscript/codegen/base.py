@@ -15,7 +15,9 @@ clases):
   * contexto de función: cada cuerpo se genera en su propio búfer, con su
     propio `TempAllocator`, entre `func_begin`/`func_end` (`function()`),
   * pila de destinos de break/continue (`breakable`, `break_target`,
-    `continue_target`).
+    `continue_target`) y de manejadores de excepción (`handler`,
+    `emit_jump_out`, `emit_return`), que emiten los `pop_handler` necesarios
+    cuando un salto abandona uno o más bloques `try`.
 
 Los mixins deben implementar `gen_expr` (valor de una expresión) y
 `gen_cond` (código de saltos para una condición).
@@ -51,6 +53,7 @@ class JumpTargets:
 
     break_label: Label
     continue_label: Optional[Label] = None
+    handlers: int = 0     # manejadores try activos al entrar a la estructura
 
 
 @dataclass
@@ -59,6 +62,7 @@ class _FunctionContext:
     code: List[Quad] = field(default_factory=list)
     temps: TempAllocator = field(default_factory=TempAllocator)
     jumps: List[JumpTargets] = field(default_factory=list)
+    handlers: int = 0     # push_handler sin su pop_handler en la función actual
 
 
 class CodeGenBase(CompiscriptVisitor):
@@ -235,23 +239,60 @@ class CodeGenBase(CompiscriptVisitor):
     def breakable(self, break_label: Label, continue_label: Optional[Label] = None):
         """Registra los destinos de break/continue mientras se genera el cuerpo
         de un bucle (`continue_label` obligatorio) o de un switch (`None`)."""
-        self._ctx.jumps.append(JumpTargets(break_label, continue_label))
+        self._ctx.jumps.append(JumpTargets(break_label, continue_label, self._ctx.handlers))
         try:
             yield
         finally:
             self._ctx.jumps.pop()
 
-    def break_target(self) -> Label:
+    def _break_targets(self) -> JumpTargets:
         if not self._ctx.jumps:
             raise CodegenError("'break' fuera de un bucle o switch")
-        return self._ctx.jumps[-1].break_label
+        return self._ctx.jumps[-1]
+
+    def _continue_targets(self) -> JumpTargets:
+        for targets in reversed(self._ctx.jumps):
+            if targets.continue_label is not None:
+                return targets
+        raise CodegenError("'continue' fuera de un bucle")
+
+    def break_target(self) -> Label:
+        return self._break_targets().break_label
 
     def continue_target(self) -> Label:
         """Continue salta al bucle más interno, atravesando los switch."""
-        for targets in reversed(self._ctx.jumps):
-            if targets.continue_label is not None:
-                return targets.continue_label
-        raise CodegenError("'continue' fuera de un bucle")
+        return self._continue_targets().continue_label
+
+    # ============================================================ try / catch
+
+    @contextmanager
+    def handler(self, catch_label: Label):
+        """Cuerpo protegido de un try: `push_handler L` ... `pop_handler`."""
+        self.emit(Op.PUSH_HANDLER, result=catch_label)
+        self._ctx.handlers += 1
+        try:
+            yield
+        finally:
+            self._ctx.handlers -= 1
+            self.emit(Op.POP_HANDLER)
+
+    def _pop_handlers(self, down_to: int) -> None:
+        for _ in range(self._ctx.handlers - down_to):
+            self.emit(Op.POP_HANDLER, comment="salida anticipada del try")
+
+    def emit_jump_out(self, kind: str) -> Quad:
+        """`goto` de un break (`kind="break"`) o continue (`"continue"`),
+        precedido de un pop_handler por cada try que el salto abandona."""
+        targets = self._break_targets() if kind == "break" else self._continue_targets()
+        self._pop_handlers(targets.handlers)
+        label = targets.break_label if kind == "break" else targets.continue_label
+        return self.emit_goto(label)
+
+    def emit_return(self, value: Optional[Operand] = None) -> Quad:
+        """`return [x]`, cerrando antes los try abiertos en la función."""
+        self._pop_handlers(0)
+        self.release(value)
+        return self.emit(Op.RETURN, value)
 
     # ====================================================== anotaciones semánticas
 
