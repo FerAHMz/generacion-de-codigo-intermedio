@@ -8,8 +8,10 @@ que el intérprete y las fases siguientes no tengan que volver a parsear texto.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Iterable, List, Optional, Union
+
+from ..types import FLOAT, Type
 
 
 # ---------------------------------------------------------------------------
@@ -19,12 +21,21 @@ from typing import Iterable, List, Optional, Union
 class Operand:
     """Clase base de los operandos de un cuádruplo."""
 
+    @property
+    def is_float(self) -> bool:
+        """True si el valor es float: en MIPS va a un registro $f."""
+        return getattr(self, "type", None) == FLOAT
+
 
 @dataclass(frozen=True)
 class Temp(Operand):
-    """Temporal `tN`. Lo crea y recicla `ir.temps.TempAllocator`."""
+    """Temporal `tN`. Lo crea y recicla `ir.temps.TempAllocator`.
+
+    `type` es informativo (no participa en la igualdad): `t1` es el mismo
+    temporal aunque se reutilice para valores de tipos distintos."""
 
     index: int
+    type: Optional[Type] = field(default=None, compare=False)
 
     def __str__(self) -> str:
         return f"t{self.index}"
@@ -46,6 +57,7 @@ class Var(Operand):
     name: str
     address: str = ""
     hops: int = 0
+    type: Optional[Type] = field(default=None, compare=False)
 
     def __str__(self) -> str:
         return self.name
@@ -63,6 +75,10 @@ class Const(Operand):
     """Literal: integer, float, string, boolean o null (`value=None`)."""
 
     value: Union[int, float, str, bool, None]
+
+    @property
+    def is_float(self) -> bool:
+        return isinstance(self.value, float)
 
     def __str__(self) -> str:
         v = self.value

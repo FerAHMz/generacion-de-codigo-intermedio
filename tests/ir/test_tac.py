@@ -85,3 +85,11 @@ def test_programa_mal_formado_reporta_problemas():
     assert any("L9" in x for x in problems)
     assert any("duplicada" in x for x in problems)
     assert any("sin func_end" in x for x in problems)
+
+
+def test_tipo_de_operandos_no_afecta_igualdad():
+    from compiscript.types import FLOAT, INTEGER
+    assert Temp(1, FLOAT) == Temp(1, INTEGER) == Temp(1)
+    assert Temp(1, FLOAT).is_float and not Temp(1).is_float
+    assert Var("x", "fp[-4]", 0, FLOAT).is_float
+    assert Const(2.5).is_float and not Const(2).is_float

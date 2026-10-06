@@ -180,3 +180,14 @@ def test_contrato_de_mixins_pendiente():
         g.gen_expr(None)
     with pytest.raises(NotImplementedError):
         g.gen_cond(None, None, None)
+
+
+def test_temporales_llevan_tipo_para_elegir_registros():
+    from compiscript.types import BOOLEAN, FLOAT, INTEGER
+    g = gen("let n: integer = 1; let f: float = 2.0;")
+    with g.function(g.table.main):
+        n, f = g.var(g.table.global_scope.symbols["n"]), g.var(g.table.global_scope.symbols["f"])
+        assert n.type == INTEGER and f.is_float
+        assert g.emit_binary(Op.MUL, f, Const(2.0)).is_float
+        assert g.emit_binary(Op.LT, n, Const(3)).type == BOOLEAN
+        assert g.coerce(n, INTEGER, FLOAT).is_float

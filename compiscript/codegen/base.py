@@ -36,7 +36,7 @@ from ..generated.CompiscriptVisitor import CompiscriptVisitor
 from ..ir.tac import Const, Label, Op, Operand, Quad, TACProgram, Temp, Var
 from ..ir.temps import TempAllocator
 from ..symbols import ActivationRecord, FunctionSymbol, Scope, Symbol, SymbolTable
-from ..types import ERROR, FLOAT, INTEGER, Type
+from ..types import BOOLEAN, ERROR, FLOAT, INTEGER, Type
 
 P = CompiscriptParser
 
@@ -139,18 +139,25 @@ class CodeGenBase(CompiscriptVisitor):
         self.release(src)
         return self.emit(Op.ASSIGN, src, None, dst, comment)
 
-    def emit_binary(self, op: str, a: Operand, b: Operand) -> Temp:
+    def emit_binary(self, op: str, a: Operand, b: Operand, type: Optional[Type] = None) -> Temp:
         """`t = a op b`: libera los operandos ANTES de pedir el resultado, de
-        modo que el resultado puede reutilizar el temporal de un operando."""
+        modo que el resultado puede reutilizar el temporal de un operando.
+        `type` es el tipo del resultado (por defecto boolean en relacionales y
+        float si algún operando es float)."""
+        if type is None:
+            type = BOOLEAN if op in Op.RELOPS else (FLOAT if a.is_float or b.is_float else None)
         self.release(a, b)
-        t = self.new_temp()
+        t = self.new_temp(type)
         self.emit(op, a, b, t)
         return t
 
-    def emit_unary(self, op: str, a: Operand) -> Temp:
+    def emit_unary(self, op: str, a: Operand, type: Optional[Type] = None) -> Temp:
         """`t = op a` (minus, not, int_to_float, len)."""
+        if type is None:
+            type = {Op.INT_TO_FLOAT: FLOAT, Op.NOT: BOOLEAN, Op.LEN: INTEGER}.get(
+                op, FLOAT if a.is_float else None)
         self.release(a)
-        t = self.new_temp()
+        t = self.new_temp(type)
         self.emit(op, a, None, t)
         return t
 
@@ -194,8 +201,8 @@ class CodeGenBase(CompiscriptVisitor):
     def temps(self) -> TempAllocator:
         return self._ctx.temps
 
-    def new_temp(self) -> Temp:
-        return self.temps.new()
+    def new_temp(self, type: Optional[Type] = None) -> Temp:
+        return self.temps.new(type)
 
     def release(self, *operands: Optional[Operand]) -> None:
         self.temps.release(*[o for o in operands if o is not None])
@@ -313,10 +320,10 @@ class CodeGenBase(CompiscriptVisitor):
         estático necesarios si pertenece a una función externa (closure)."""
         if sym.address is None:
             raise CodegenError(f"'{sym.name}' no tiene dirección asignada")
-        return Var(sym.name, sym.address, self.table.hops(sym, self.record))
+        return Var(sym.name, sym.address, self.table.hops(sym, self.record), sym.type)
 
     def this_var(self) -> Var:
         this = self.record.this
         if this is None:
             raise CodegenError("'this' fuera de un método")
-        return Var("this", this.address)
+        return Var("this", this.address, 0, this.type)

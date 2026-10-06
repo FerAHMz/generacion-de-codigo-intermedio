@@ -26,8 +26,9 @@ Ejemplo: `x = a + b + c + d`
 from __future__ import annotations
 
 import heapq
-from typing import List, Set
+from typing import List, Optional, Set
 
+from ..types import Type
 from .tac import Operand, Temp
 
 
@@ -46,7 +47,7 @@ class TempAllocator:
 
     # ------------------------------------------------------------------ API
 
-    def new(self) -> Temp:
+    def new(self, type: Optional[Type] = None) -> Temp:
         if self._free:
             idx = heapq.heappop(self._free)
         else:
@@ -55,7 +56,7 @@ class TempAllocator:
         self._live.add(idx)
         self.allocations += 1
         self.max_live = max(self.max_live, len(self._live))
-        return Temp(idx)
+        return Temp(idx, type)
 
     def release(self, *operands: Operand) -> None:
         """Libera los temporales entre `operands`. Liberar dos veces el mismo
