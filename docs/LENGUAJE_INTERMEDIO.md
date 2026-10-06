@@ -164,7 +164,11 @@ Registro de activación externa_media (nivel 2, static link -> externa) frame_si
 
 ## 5. Temporales: asignación y reciclaje
 
-`TempAllocator` (`compiscript/ir/temps.py`) mantiene una free-list ordenada:
+El reciclaje se hace en dos niveles.
+
+### 5.1 Al generar: free-list (`compiscript/ir/temps.py`)
+
+`TempAllocator` mantiene una free-list ordenada:
 
 1. `new()` entrega el temporal libre de **menor número**, o crea uno nuevo.
 2. Un temporal se libera en cuanto su valor se consume como operando. El
@@ -186,6 +190,32 @@ Como siempre se reutiliza el menor libre, los nombres usados son exactamente
 `(a + b) * (c + d)` necesita `max_live = 2`: `t1 = a + b`, `t2 = c + d`,
 `t1 = t1 * t2`.
 
+### 5.2 Sobre el TAC: vida + linear scan (`compiscript/ir/liveness.py`)
+
+Basado en M. Poletto y V. Sarkar, *Linear Scan Register Allocation*, ACM
+TOPLAS 21(5), 1999 (por confirmar con el profesor que es el paper del MIT que
+recomendó):
+
+1. **Vida:** análisis de flujo de datos hacia atrás sobre el grafo de flujo de
+   cada función (`goto`, saltos condicionales, `return`, y `push_handler` con
+   arista al manejador). Solo temporales: las variables viven en memoria.
+2. **Valores:** como `t1` se recicla, un mismo nombre contiene valores sin
+   relación. Con definiciones que alcanzan se agrupan las definiciones que
+   llegan a un mismo uso; cada grupo es un valor con su intervalo
+   `[inicio, fin]` en orden lineal. En un bucle, el intervalo se extiende hasta
+   el salto de regreso.
+3. **Linear scan:** se recorren los intervalos por inicio; los que terminaron
+   devuelven su registro; si no hay libre, se derrama (spill) el que termina más
+   tarde. Dos intervalos que solo se tocan en un extremo comparten registro
+   (`add $t0, $t0, $t1`). Las clases entera y flotante se asignan por separado
+   (por eso `Temp` y `Var` llevan su tipo).
+
+| Función | Uso |
+|---|---|
+| `allocate_registers(prog)` | registro MIPS o ranura de spill de cada aparición de un temporal (`location(pos, t, "use"/"def")`); base de `getReg()` |
+| `compact_temps(prog)` | renombra con el mínimo de temporales que permite la vida real (registros ilimitados) |
+| `LiveInterval.crosses_call` | el valor está vivo durante un `call`: en MIPS conviene un `$s` (lo preserva el llamado) |
+
 ## 6. Convenciones de llamada
 
 **Llamada** `f(a1, …, an)`:
@@ -198,10 +228,11 @@ t1 = call f, n        # o `call f, n` si es void
 ```
 
 * El parámetro `i` queda en `fp[+encabezado + offset_i]` del marco del llamado.
-* **Static link:** lo establece la secuencia de llamada. Si el llamador está en
-  el nivel `p` y el llamado en el nivel `q` (`q ≤ p + 1`), se siguen `p - q + 1`
-  enlaces estáticos desde el marco del llamador. No hay instrucción explícita:
-  el nivel de cada función está en su registro de activación.
+* **Static link:** solo se pasa si el llamado lo necesita (§4.3). Lo establece
+  la secuencia de llamada: si el llamador está en el nivel `p` y el llamado en el
+  nivel `q` (`q ≤ p + 1`), se siguen `p - q + 1` enlaces estáticos desde el marco
+  del llamador. No hay instrucción explícita: el nivel de cada función está en
+  su registro de activación.
 * **Retorno:** `return x` deja el valor en el registro de retorno; `t = call`
   lo recibe. `func_end` equivale a `return` sin valor.
 * **Recursión:** cada llamada crea un marco nuevo; no requiere nada especial.
@@ -374,15 +405,26 @@ try S1 catch (e) S2      push_handler Lcatch
                        Lend:
 ```
 
-**Supuestos:**
+**Supuestos** (catálogo en `compiscript/ir/runtime.py`):
 
 * Compiscript no tiene `throw`: las excepciones son errores en tiempo de
-  ejecución (índice fuera de rango, acceso a `null`, división entre cero).
-* `push_handler L` registra el par (`L`, marco actual). Ante un error, se
-  desapilan marcos hasta el del manejador más reciente, se retira ese manejador
-  y se salta a `L`; `exception` contiene el mensaje (string).
+  ejecución que revisan ciertas instrucciones antes de ejecutarse:
+
+  | Error | Mensaje (valor de `e`) | Lo revisan |
+  |---|---|---|
+  | índice fuera de rango | `"índice fuera de rango"` | `t = a[i]`, `a[i] = x` |
+  | acceso a `null` | `"acceso a una referencia null"` | `a[i]`, `len`, `[obj + off]`, `method` |
+  | división entre cero | `"división entre cero"` | `/`, `%` |
+
+* `push_handler L` apila el registro (`L`, `fp`, `sp`) del marco actual.
+* Ante un error: si no hay manejador, el programa termina imprimiendo el
+  mensaje; si hay, se desapila el más reciente, se restauran `fp` y `sp` (esto
+  descarta los marcos de las funciones llamadas dentro del try) y se salta a
+  `L`; `exception` contiene el mensaje (string).
 * Un `break`, `continue` o `return` que sale de uno o más `try` emite un
   `pop_handler` por cada uno antes del salto (`emit_jump_out`, `emit_return`).
+* Para la vida de temporales, `push_handler L` tiene arista a `L`: un valor
+  que se usa en el catch está vivo durante todo el try.
 
 ### 7.12 Arreglos
 
@@ -398,8 +440,8 @@ xs[0] = 5;                          xs[0] = 5
 ```
 
 **Supuesto:** el índice es en **elementos**, no en bytes; el arreglo guarda su
-longitud (`len`). La traducción a bytes (`i * sizeof(elemento)` + encabezado) se
-hará en la generación de código objeto. Un índice fuera de rango es un error en
+longitud (`len`). La traducción a bytes (`base + 4 + 4·i`) se hace en la
+generación de MIPS (§9.1). Un índice fuera de rango es un error en
 tiempo de ejecución (capturable con try/catch).
 
 ### 7.13 Clases y objetos
@@ -490,3 +532,60 @@ function externa(n: integer): integer {
 * Las variables de bloques de nivel superior se ubican en el área global; las de
   bloques dentro de funciones se aplanan en el marco de la función (sin reutilizar
   el espacio de bloques hermanos, para simplificar).
+
+## 9. Preparación para la generación de MIPS
+
+La fase siguiente traduce este TAC a MIPS32 y lo ejecuta en un simulador
+(MARS o SPIM). Estas decisiones ya están tomadas en el TAC y la tabla de
+símbolos para que esa traducción sea directa.
+
+### 9.1 Memoria
+
+| Segmento | Contenido | Origen en el compilador |
+|---|---|---|
+| `.data` | variables globales (`global[off]` → `globals + off`), literales string (`.asciiz`), mensajes de error, vtables (`.word Clase_metodo, …`) | `SymbolTable.globals_size`, `ClassLayout.vtable`, `runtime.MESSAGES` |
+| pila | un marco por llamada, direccionado con `$fp` | `ActivationRecord` |
+| heap | objetos (`new C, size`) y arreglos (`alloc n`), con `sbrk` (syscall 9) | `ClassLayout.object_size` |
+
+* Los tamaños de §4.1 ya son de MIPS32: todo cabe en una palabra, `float` es de
+  precisión simple y `boolean` usa `lb`/`sb`.
+* **Arreglos:** `[base]` guarda la longitud y los elementos empiezan en
+  `base + 4`, una palabra cada uno. `t = a[i]` se traduce a: revisar `null`,
+  revisar `0 ≤ i < len`, dirección `a + 4 + 4·i`.
+* **Objetos:** `[obj + 0]` apunta a la vtable de su clase; `t = method obj, m`
+  es `lw` de la vtable más `lw` de la ranura `ClassLayout.method_slot(m)` y
+  `call t, n` es `jalr`.
+
+### 9.2 Secuencias de llamada y retorno
+
+| Paso | MIPS |
+|---|---|
+| `param x` (llamador) | al primer `param` se reservan `4·n` bytes en la pila; cada argumento se guarda en su offset, con el parámetro 0 en la dirección más baja (junto al encabezado), para que quede en `fp[+encabezado + off]` del llamado |
+| static link (llamador, solo si el llamado lo necesita) | seguir `p - q + 1` enlaces desde `$fp` y apilarlo |
+| `call f, n` | `jal f`; al volver, `addi $sp, $sp, 4·(n + static link)`; el resultado está en `$v0` (`$f0` si es float) |
+| `func_begin f, size` (prólogo) | guardar `$ra` si la función no es hoja, guardar el `$fp` anterior (control link), `$fp = $sp`, reservar locales y spill (`size`) |
+| `return x` / `func_end f` (epílogo) | valor a `$v0`/`$f0`, `$sp = $fp`, restaurar `$fp` y `$ra`, `jr $ra` |
+| `main` | sin encabezado; termina con `li $v0, 10` / `syscall` |
+
+### 9.3 Asignación de registros: `getReg()`
+
+`getReg()` se basa en `allocate_registers()` (§5.2):
+
+* Temporales enteros → `$t0–$t9` y `$s0–$s7`; flotantes → `$f4–$f11`, `$f16–$f31`.
+  Quedan reservados `$at`, `$v0–$v1`, `$a0–$a3`, `$k0–$k1`, `$gp`, `$sp`, `$fp`,
+  `$ra`, `$f0` y `$f12–$f14`.
+* Un temporal derramado vive en su ranura de spill del marco; se carga en un
+  registro de trabajo antes de usarlo y se guarda después de definirlo.
+* Valores con `crosses_call`: preferir `$s` (los preserva el llamado) o guardar
+  los `$t` vivos antes del `jal` y restaurarlos después.
+* Las variables del programa no ocupan registros entre instrucciones: se leen
+  con `lw`/`l.s`/`lb` desde su dirección y se escriben con `sw`/`s.s`/`sb`.
+
+### 9.4 Excepciones en MIPS
+
+* Pila de manejadores en memoria: cada `push_handler L` guarda (`L`, `$fp`,
+  `$sp`).
+* Las revisiones de §7.11 saltan a una rutina común `__raise` con el mensaje en
+  `$a0`: si la pila de manejadores está vacía, imprime el mensaje y termina;
+  si no, desapila, restaura `$fp`/`$sp` y salta a `L` con el mensaje en `$v0`
+  (`e = exception` lo copia de ahí).
