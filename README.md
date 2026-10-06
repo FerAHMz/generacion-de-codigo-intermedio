@@ -53,7 +53,9 @@ compiscript/
                             activación y layout de clases
   semantic/                 visitor semántico (base, expressions, declarations,
                             functions, control_flow, classes)
-  ir/                       TAC: cuádruplos y operandos (tac.py), temporales (temps.py)
+  ir/                       TAC: cuádruplos y operandos (tac.py), temporales (temps.py),
+                            vida de temporales y linear scan (liveness.py),
+                            errores en tiempo de ejecución (runtime.py)
   codegen/                  generador de TAC (base.py) y pipeline compile_source
   tree_viz.py               árbol en texto / LISP / JSON / Graphviz
 Driver.py                   línea de comandos
@@ -77,7 +79,7 @@ Dockerfile, commands/, antlr-4.13.1-complete.jar   entorno Docker del curso
 
 | Integrante | Porción | Estado |
 |---|---|---|
-| Fernando Hernández | Preparación de la base, anotaciones para la segunda pasada, cuádruplos (`ir/tac.py`), temporales (`ir/temps.py`), direcciones / registros de activación / layout de clases (`symbols.py`), esqueleto del generador (`codegen/base.py`), diseño del lenguaje intermedio, plan de trabajo. | Terminado |
+| Fernando Hernández | Preparación de la base, anotaciones para la segunda pasada, cuádruplos (`ir/tac.py`), temporales (`ir/temps.py`), vida de temporales y linear scan (`ir/liveness.py`), errores en ejecución (`ir/runtime.py`), direcciones / registros de activación por uso / layout de clases (`symbols.py`), esqueleto del generador (`codegen/base.py`), diseño del lenguaje intermedio y preparación para MIPS. | Terminado |
 | Felipe Aguilar | Generador de TAC: expresiones, booleanos con corto circuito, control de flujo, funciones y closures, clases. | Pendiente |
 | Fernando Rueda | Batería `tests/tac/`, intérprete de TAC, Driver (`--tac`, `--out`), IDE (`/api/compile`, pestañas de TAC y registros de activación), documentación final. | Pendiente |
 
