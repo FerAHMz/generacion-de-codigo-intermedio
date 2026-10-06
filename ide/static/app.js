@@ -1,0 +1,129 @@
+/* Compiscript IDE — lógica del cliente */
+(function () {
+  const DEFAULT_SOURCE = `// Escribe tu programa Compiscript aquí y presiona Compilar.
+const PI: integer = 314;
+let saludo: string = "Hola, Compiscript!";
+
+function factorial(n: integer): integer {
+  if (n <= 1) { return 1; }
+  return n * factorial(n - 1);
+}
+
+class Animal {
+  let nombre: string;
+  function constructor(nombre: string) { this.nombre = nombre; }
+  function hablar(): string { return this.nombre + " hace ruido."; }
+}
+
+let a: Animal = new Animal("Toby");
+print(a.hablar());
+print(factorial(5));
+`;
+
+  const editor = CodeMirror.fromTextArea(document.getElementById("code"), {
+    mode: "javascript", theme: "material-darker", lineNumbers: true, matchBrackets: true,
+    autoCloseBrackets: true, indentUnit: 2, tabSize: 2, gutters: ["error-gutter", "CodeMirror-linenumbers"],
+    extraKeys: { "Ctrl-Enter": run, "Cmd-Enter": run },
+  });
+  editor.setValue(localStorage.getItem("cps.source") || DEFAULT_SOURCE);
+
+  const $ = (id) => document.getElementById(id);
+  const status = $("status"), errList = $("errors"), errCount = $("err-count");
+  const symBody = document.querySelector("#symbols tbody"), treeBox = $("tree");
+  let markers = [], timer = null;
+
+  // --- pestañas -------------------------------------------------------------
+  document.querySelectorAll(".tabs button").forEach((b) => b.addEventListener("click", () => {
+    document.querySelectorAll(".tabs button, .tab").forEach((x) => x.classList.remove("active"));
+    b.classList.add("active"); $("tab-" + b.dataset.tab).classList.add("active");
+  }));
+
+  // --- ejemplos -------------------------------------------------------------
+  fetch("/api/examples").then((r) => r.json()).then((names) => {
+    names.forEach((n) => { const o = document.createElement("option"); o.value = n; o.textContent = n; $("examples").appendChild(o); });
+  });
+  $("examples").addEventListener("change", (e) => {
+    if (!e.target.value) return;
+    fetch("/api/examples/" + encodeURIComponent(e.target.value)).then((r) => r.text()).then((src) => { editor.setValue(src); run(); });
+  });
+
+  // --- análisis -------------------------------------------------------------
+  function clearMarks() {
+    markers.forEach((m) => m.clear && m.clear());
+    markers = [];
+    editor.eachLine((l) => { editor.removeLineClass(l, "background", "error-line"); });
+    editor.clearGutter("error-gutter");
+  }
+
+  function run() {
+    const source = editor.getValue();
+    localStorage.setItem("cps.source", source);
+    status.textContent = "analizando…"; status.className = "status";
+    fetch("/api/analyze", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ source }) })
+      .then((r) => r.json()).then(render).catch((err) => { status.textContent = "error de conexión"; status.className = "status bad"; console.error(err); });
+  }
+
+  function render(data) {
+    clearMarks();
+    const n = data.errors.length;
+    status.textContent = n ? `✘ ${n} error(es)` : "✔ sin errores";
+    status.className = "status " + (n ? "bad" : "ok");
+    errCount.textContent = n; errCount.className = "badge" + (n ? "" : " zero");
+
+    errList.innerHTML = "";
+    if (!n) { const li = document.createElement("li"); li.className = "empty"; li.textContent = "El programa es sintáctica y semánticamente correcto."; errList.appendChild(li); }
+    data.errors.forEach((e) => {
+      const li = document.createElement("li"); li.className = e.phase;
+      li.innerHTML = `<span class="pos">${e.line}:${e.column}</span>${e.phase === "syntax" ? "[sintaxis] " : ""}${escapeHtml(e.message)}`;
+      li.addEventListener("click", () => { editor.setCursor({ line: e.line - 1, ch: e.column }); editor.focus(); });
+      errList.appendChild(li);
+      if (e.line > 0) {
+        editor.addLineClass(e.line - 1, "background", "error-line");
+        const marker = document.createElement("span"); marker.className = "error-gutter"; marker.textContent = "●"; marker.title = e.message;
+        editor.setGutterMarker(e.line - 1, "error-gutter", marker);
+        const from = { line: e.line - 1, ch: e.column }, to = { line: e.line - 1, ch: e.column + 1 };
+        markers.push(editor.markText(from, to, { className: "cm-error", title: e.message }));
+      }
+    });
+
+    symBody.innerHTML = "";
+    data.symbols.forEach((s) => {
+      const tr = document.createElement("tr");
+      tr.innerHTML = `<td>${escapeHtml(s.scope)}</td><td>${escapeHtml(s.name)}</td><td class="kind-${s.kind}">${s.kind}</td>` +
+        `<td>${escapeHtml(s.type)}</td><td>${s.line}</td><td>${s.offset}</td><td>${escapeHtml(s.extra || "")}</td>`;
+      symBody.appendChild(tr);
+    });
+
+    treeBox.innerHTML = ""; treeBox.appendChild(buildTree(data.tree));
+  }
+
+  function buildTree(node) {
+    const ul = document.createElement("ul"); ul.appendChild(buildNode(node)); return ul;
+  }
+  function buildNode(node) {
+    const li = document.createElement("li");
+    const span = document.createElement("span"); span.className = "node " + node.kind;
+    const hasKids = node.children && node.children.length;
+    span.innerHTML = `<span class="toggle">${hasKids ? "▾" : "·"}</span>` +
+      (node.kind === "token" ? `<span class="token">'${escapeHtml(node.name)}'</span>` : `<span class="rule">${node.name}</span>`) +
+      (node.type ? `<span class="type">${escapeHtml(node.type)}</span>` : "");
+    span.addEventListener("click", (ev) => { ev.stopPropagation(); if (hasKids) { li.classList.toggle("collapsed"); span.querySelector(".toggle").textContent = li.classList.contains("collapsed") ? "▸" : "▾"; } if (node.line) editor.setCursor({ line: node.line - 1, ch: node.column || 0 }); });
+    li.appendChild(span);
+    if (hasKids) { const ul = document.createElement("ul"); node.children.forEach((c) => ul.appendChild(buildNode(c))); li.appendChild(ul); }
+    return li;
+  }
+
+  $("svg").addEventListener("click", () => {
+    fetch("/api/tree.svg", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ source: editor.getValue() }) })
+      .then(async (r) => {
+        if (!r.ok) { const j = await r.json(); alert(j.error || "No se pudo generar el SVG"); return; }
+        const blob = await r.blob(); window.open(URL.createObjectURL(blob), "_blank");
+      });
+  });
+
+  function escapeHtml(s) { return String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c])); }
+
+  $("run").addEventListener("click", run);
+  editor.on("change", () => { if (!$("live").checked) return; clearTimeout(timer); timer = setTimeout(run, 500); });
+  run();
+})();

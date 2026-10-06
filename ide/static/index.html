@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <title>Compiscript IDE</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/codemirror.min.css">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/theme/material-darker.min.css">
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <header>
+    <div class="brand">🧪 Compiscript IDE <span class="sub">análisis sintáctico y semántico</span></div>
+    <div class="toolbar">
+      <select id="examples" title="Cargar ejemplo"><option value="">Ejemplos…</option></select>
+      <button id="run" class="primary">▶ Compilar (Ctrl+Enter)</button>
+      <button id="svg">Árbol SVG</button>
+      <label class="check"><input type="checkbox" id="live" checked> análisis en vivo</label>
+      <span id="status" class="status"></span>
+    </div>
+  </header>
+
+  <main>
+    <section class="editor-pane">
+      <textarea id="code"></textarea>
+    </section>
+    <section class="side-pane">
+      <nav class="tabs">
+        <button data-tab="errors" class="active">Errores <span id="err-count" class="badge">0</span></button>
+        <button data-tab="symbols">Tabla de símbolos</button>
+        <button data-tab="tree">Árbol sintáctico</button>
+      </nav>
+      <div id="tab-errors" class="tab active"><ul id="errors" class="errors"></ul></div>
+      <div id="tab-symbols" class="tab">
+        <div class="table-wrap">
+          <table id="symbols">
+            <thead><tr><th>Entorno</th><th>Nombre</th><th>Categoría</th><th>Tipo</th><th>Línea</th><th>Offset</th><th>Detalle</th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </div>
+      <div id="tab-tree" class="tab"><div id="tree" class="tree"></div></div>
+    </section>
+  </main>
+
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/codemirror.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/mode/javascript/javascript.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/addon/edit/matchbrackets.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/addon/edit/closebrackets.min.js"></script>
+  <script src="/static/app.js"></script>
+</body>
+</html>

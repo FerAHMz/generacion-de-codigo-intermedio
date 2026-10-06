@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+*.egg-info/
+
+# ANTLR intermediates (los .py generados sí se versionan en compiscript/generated)
+*.interp
+*.tokens
+
+# IDE / SO
+.DS_Store
+.vscode/
+.idea/
+
+# Salidas
+out/
+*.svg
+*.png
+!docs/**/*.png

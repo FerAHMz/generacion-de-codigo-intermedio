@@ -1,0 +1,59 @@
+:root {
+  --bg: #1e1f22; --panel: #26282c; --border: #3a3d42; --text: #e6e6e6; --muted: #9aa0a6;
+  --accent: #4caf50; --error: #ef5350; --warn: #ffb74d; --token: #80cbc4; --rule: #ce93d8;
+}
+* { box-sizing: border-box; }
+html, body { height: 100%; margin: 0; }
+body { font-family: -apple-system, "Segoe UI", Helvetica, Arial, sans-serif; background: var(--bg); color: var(--text); display: flex; flex-direction: column; }
+header { display: flex; align-items: center; justify-content: space-between; gap: 1rem; padding: .5rem 1rem; background: #2e7d32; color: #fff; flex-wrap: wrap; }
+.brand { font-weight: 600; font-size: 1.05rem; }
+.brand .sub { font-weight: 400; opacity: .85; font-size: .85rem; margin-left: .5rem; }
+.toolbar { display: flex; align-items: center; gap: .5rem; flex-wrap: wrap; }
+button, select { background: #1b5e20; color: #fff; border: 1px solid rgba(255,255,255,.25); border-radius: 4px; padding: .35rem .7rem; cursor: pointer; font-size: .9rem; }
+button.primary { background: #fff; color: #1b5e20; font-weight: 600; }
+button:hover { filter: brightness(1.1); }
+.check { font-size: .85rem; display: flex; align-items: center; gap: .3rem; }
+.status { font-size: .85rem; min-width: 8rem; }
+.status.ok { color: #c8e6c9; } .status.bad { color: #ffcdd2; }
+
+main { flex: 1; display: grid; grid-template-columns: 1fr 1fr; min-height: 0; }
+.editor-pane { min-height: 0; border-right: 1px solid var(--border); }
+.CodeMirror { height: 100%; font-size: 14px; font-family: "JetBrains Mono", Menlo, Consolas, monospace; }
+.side-pane { display: flex; flex-direction: column; min-height: 0; background: var(--panel); }
+.tabs { display: flex; border-bottom: 1px solid var(--border); }
+.tabs button { background: transparent; border: none; border-bottom: 2px solid transparent; color: var(--muted); border-radius: 0; padding: .6rem 1rem; }
+.tabs button.active { color: var(--text); border-bottom-color: var(--accent); }
+.badge { background: var(--error); color: #fff; border-radius: 10px; padding: 0 .45rem; font-size: .75rem; margin-left: .3rem; }
+.badge.zero { background: var(--accent); }
+.tab { display: none; flex: 1; overflow: auto; padding: .5rem; min-height: 0; }
+.tab.active { display: block; }
+
+.errors { list-style: none; margin: 0; padding: 0; }
+.errors li { padding: .45rem .6rem; border-left: 3px solid var(--error); margin-bottom: .35rem; background: rgba(239,83,80,.08); border-radius: 3px; cursor: pointer; font-size: .9rem; }
+.errors li.syntax { border-left-color: var(--warn); background: rgba(255,183,77,.08); }
+.errors li .pos { color: var(--muted); font-family: monospace; margin-right: .5rem; }
+.errors li.empty { border-left-color: var(--accent); background: rgba(76,175,80,.1); cursor: default; }
+
+.table-wrap { overflow: auto; }
+table { border-collapse: collapse; width: 100%; font-size: .85rem; font-family: Menlo, Consolas, monospace; }
+th, td { text-align: left; padding: .3rem .5rem; border-bottom: 1px solid var(--border); white-space: nowrap; }
+th { position: sticky; top: 0; background: var(--panel); color: var(--muted); font-weight: 600; }
+td.kind-function, td.kind-method { color: #81d4fa; } td.kind-class { color: var(--rule); } td.kind-constant { color: var(--warn); }
+
+.tree { font-family: Menlo, Consolas, monospace; font-size: .85rem; }
+.tree ul { list-style: none; margin: 0; padding-left: 1.1rem; border-left: 1px dotted var(--border); }
+.tree > ul { padding-left: 0; border: none; }
+.tree li { margin: .1rem 0; }
+.tree .node { cursor: pointer; user-select: none; }
+.tree .rule { color: var(--rule); } .tree .token { color: var(--token); }
+.tree .type { color: var(--muted); font-style: italic; margin-left: .4rem; }
+.tree .type::before { content: ": "; }
+.tree .collapsed > ul { display: none; }
+.tree .toggle { display: inline-block; width: 1rem; color: var(--muted); }
+.tree img { max-width: 100%; background: #fff; border-radius: 4px; }
+
+.CodeMirror .error-line { background: rgba(239,83,80,.18); }
+.CodeMirror .error-gutter { color: var(--error); font-weight: bold; }
+.CodeMirror-gutters { border-right: 1px solid var(--border); }
+
+@media (max-width: 900px) { main { grid-template-columns: 1fr; grid-template-rows: 1fr 1fr; } .editor-pane { border-right: none; border-bottom: 1px solid var(--border); } }
