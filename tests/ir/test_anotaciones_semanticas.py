@@ -56,6 +56,14 @@ def test_cada_estructura_registra_su_entorno():
     assert kinds["TryCatchStatementContext"] == ScopeKind.BLOCK
 
 
+def test_declaraciones_de_funcion_y_clase_quedan_ligadas():
+    r = analyze("class A { function m() {} } function f() {}")
+    fns = _nodes(r.tree, P.FunctionDeclarationContext)
+    assert sorted(r.node_symbols[f].label for f in fns) == ["A_m", "f"]
+    cls = _nodes(r.tree, P.ClassDeclarationContext)[0]
+    assert r.node_symbols[cls].kind == SymbolKind.CLASS
+
+
 def test_acceso_a_miembro_y_new_quedan_ligados():
     r = analyze("class A { let v: integer; } let a: A = new A(); print(a.v);")
     assert r.ok

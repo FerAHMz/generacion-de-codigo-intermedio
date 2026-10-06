@@ -47,6 +47,7 @@ class FunctionsMixin:
                              params=params, return_type=ret_type, initialized=True)
         self.declare(sym, ident, "método" if kind == SymbolKind.METHOD else "función")
         self.declared_functions[ctx] = sym
+        self.bind(ctx, sym)
         return sym
 
     # ------------------------------------------------------------ declaración

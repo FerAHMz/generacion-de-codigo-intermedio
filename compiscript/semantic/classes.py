@@ -27,6 +27,7 @@ class ClassesMixin:
                 if self.declare(sym, ident, "clase"):
                     self.classes[name] = sym
                 self.declared_functions[st] = sym
+                self.bind(st, sym)
 
     # ------------------------------------------------------------ declaración
 
