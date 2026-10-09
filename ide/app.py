@@ -5,6 +5,8 @@
 Endpoints:
     GET  /                    interfaz del editor
     POST /api/analyze         {"source": "..."} -> errores, tabla de símbolos, árbol
+    POST /api/compile         {"source": "..."} -> errores, TAC y registros de activación
+    POST /api/run             {"source": "..."} -> salida del TAC ejecutado con el intérprete
     POST /api/tree.svg        {"source": "..."} -> imagen SVG del árbol (requiere Graphviz)
     GET  /api/examples        lista de programas de ejemplo
     GET  /api/examples/<name> contenido de un ejemplo
@@ -16,12 +18,15 @@ import os
 
 from flask import Flask, Response, abort, jsonify, request, send_from_directory
 
+from compiscript.codegen import compile_source
+from compiscript.ir.interp import Interpreter, InterpreterError
 from compiscript.semantic import analyze
 from compiscript.tree_viz import render_dot, tree_to_dict, tree_to_dot
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 STATIC = os.path.join(ROOT, "ide", "static")
 EXAMPLE_DIRS = [os.path.join(ROOT, "examples"), os.path.join(ROOT, "program")]
+RUN_MAX_STEPS = 200_000   # evita que un bucle infinito bloquee el servidor
 
 app = Flask(__name__, static_folder=STATIC, static_url_path="/static")
 
@@ -50,6 +55,34 @@ def api_analyze():
         ],
         "tree": tree_to_dict(result.tree, result.node_types),
     })
+
+
+@app.post("/api/compile")
+def api_compile():
+    """Contrato: `CompileResult.to_dict()` -> {"errors", "tac", "symbols"}.
+    Con errores, `tac` queda vacío."""
+    payload = request.get_json(silent=True) or {}
+    result = compile_source(payload.get("source", ""))
+    return jsonify({"ok": result.ok, **result.to_dict()})
+
+
+@app.post("/api/run")
+def api_run():
+    """Compila y ejecuta el TAC con el intérprete (`compiscript/ir/interp.py`)."""
+    payload = request.get_json(silent=True) or {}
+    result = compile_source(payload.get("source", ""))
+    body = {"ok": result.ok, "errors": result.to_dict()["errors"], "output": [], "runtime_error": None}
+    if result.ok:
+        interp = Interpreter(result.program, result.table, max_steps=RUN_MAX_STEPS)
+        try:
+            body["output"] = interp.run()
+        except InterpreterError as exc:
+            body["output"] = interp.output
+            body["runtime_error"] = str(exc)
+        if interp.error is not None:
+            # el intérprete deja el mensaje como última línea; el IDE lo resalta aparte
+            body["output"], body["runtime_error"] = interp.output[:-1], interp.output[-1]
+    return jsonify(body)
 
 
 @app.post("/api/tree.svg")

@@ -30,6 +30,7 @@ print(factorial(5));
   const $ = (id) => document.getElementById(id);
   const status = $("status"), errList = $("errors"), errCount = $("err-count");
   const symBody = document.querySelector("#symbols tbody"), treeBox = $("tree");
+  const tacBox = $("tac"), runtimeBox = $("runtime"), outputBox = $("output");
   let markers = [], timer = null;
 
   // --- pestañas -------------------------------------------------------------
@@ -61,6 +62,69 @@ print(factorial(5));
     status.textContent = "analizando…"; status.className = "status";
     fetch("/api/analyze", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ source }) })
       .then((r) => r.json()).then(render).catch((err) => { status.textContent = "error de conexión"; status.className = "status bad"; console.error(err); });
+    compile(source);
+  }
+
+  function clearOutput() {
+    outputBox.innerHTML = '<span class="muted">Presiona «Ejecutar TAC» para correr el código intermedio con el intérprete.</span>';
+  }
+
+  function compile(source) {
+    fetch("/api/compile", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ source }) })
+      .then((r) => r.json()).then(renderCompile).catch((err) => console.error(err));
+  }
+
+  // --- código intermedio y registros de activación ----------------------------
+  function renderCompile(data) {
+    tacBox.innerHTML = "";
+    if (!data.tac.length) {
+      tacBox.innerHTML = `<span class="muted">${data.errors.length ? "Hay errores: no se generó código intermedio." : "(sin instrucciones)"}</span>`;
+    } else {
+      const width = String(data.tac.length).length;
+      tacBox.innerHTML = data.tac.map((ln, i) => {
+        const num = `<span class="ln">${String(i + 1).padStart(width)}</span>  `;
+        const [code, ...comment] = ln.split("    # ");
+        const body = /^\S/.test(code) ? `<span class="${code.startsWith("func_") ? "fn" : "lbl"}">${escapeHtml(code)}</span>` : escapeHtml(code);
+        return num + body + (comment.length ? `<span class="muted">    # ${escapeHtml(comment.join("    # "))}</span>` : "");
+      }).join("\n");
+    }
+    renderRuntime(data.symbols);
+  }
+
+  function renderRuntime(symbols) {
+    runtimeBox.innerHTML = "";
+    const add = (html) => runtimeBox.insertAdjacentHTML("beforeend", html);
+    add(`<h3>Área global <span class="muted">${symbols.globals_size} bytes</span></h3>`);
+    symbols.activation_records.forEach((ar) => {
+      const link = ar.static_link ? `, static link → ${escapeHtml(ar.static_link)}` : "";
+      const header = ar.header.length
+        ? ar.header.map((h) => `<li><code>fp[+${h.offset}]</code> ${h.field.replace("_", " ")} — <span class="muted">${escapeHtml(h.use)}</span></li>`).join("")
+        : `<li class="muted">sin encabezado (nadie la llama)</li>`;
+      const rows = ar.slots.map((s) => `<tr><td>${escapeHtml(s.address)}</td><td>${escapeHtml(s.content)}</td><td>${s.size}</td><td class="muted">${escapeHtml(s.use)}</td></tr>`).join("");
+      add(`<div class="card"><h3>${escapeHtml(ar.label)} <span class="muted">nivel ${ar.level}${link} · frame_size = ${ar.frame_size} · temporales = ${ar.temps}</span></h3>` +
+        `<ul class="header">${header}</ul>` +
+        (rows ? `<table><thead><tr><th>Dirección</th><th>Contenido</th><th>Bytes</th><th>Uso</th></tr></thead><tbody>${rows}</tbody></table>` : "") + `</div>`);
+    });
+    symbols.classes.forEach((c) => {
+      const fields = c.fields.map((f) => `<tr><td>[obj + ${f.offset}]</td><td>${escapeHtml(f.name)}</td><td>${f.size}</td><td class="muted">${escapeHtml(f.declared_in)}</td></tr>`).join("");
+      const vtable = c.vtable.map((m) => `<li>vtable[${m.slot}] ${escapeHtml(m.method)} → <code>${escapeHtml(m.label)}</code></li>`).join("");
+      add(`<div class="card"><h3>Clase ${escapeHtml(c.name)}${c.parent ? " : " + escapeHtml(c.parent) : ""} <span class="muted">object_size = ${c.object_size}</span></h3>` +
+        `<table><thead><tr><th>Offset</th><th>Atributo</th><th>Bytes</th><th>Declarado en</th></tr></thead><tbody><tr><td>[obj + 0]</td><td>vtable</td><td>4</td><td></td></tr>${fields}</tbody></table>` +
+        `<ul class="header">${vtable}${c.constructor ? `<li>constructor → <code>${escapeHtml(c.constructor)}</code></li>` : ""}</ul></div>`);
+    });
+  }
+
+  // --- ejecución con el intérprete ---------------------------------------------
+  function execute() {
+    outputBox.innerHTML = '<span class="muted">ejecutando…</span>';
+    document.querySelector('.tabs button[data-tab="output"]').click();
+    fetch("/api/run", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ source: editor.getValue() }) })
+      .then((r) => r.json()).then((data) => {
+        if (!data.ok) { outputBox.innerHTML = '<span class="err">El programa tiene errores: no se ejecuta.</span>'; return; }
+        const lines = data.output.map(escapeHtml);
+        if (data.runtime_error) lines.push(`<span class="err">${escapeHtml(data.runtime_error)}</span>`);
+        outputBox.innerHTML = lines.length ? lines.join("\n") : '<span class="muted">(sin salida)</span>';
+      }).catch((err) => { outputBox.innerHTML = '<span class="err">error de conexión</span>'; console.error(err); });
   }
 
   function render(data) {
@@ -124,6 +188,8 @@ print(factorial(5));
   function escapeHtml(s) { return String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c])); }
 
   $("run").addEventListener("click", run);
-  editor.on("change", () => { if (!$("live").checked) return; clearTimeout(timer); timer = setTimeout(run, 500); });
+  $("exec").addEventListener("click", execute);
+  editor.on("change", () => { clearOutput(); if (!$("live").checked) return; clearTimeout(timer); timer = setTimeout(run, 500); });
+  clearOutput();
   run();
 })();

@@ -16,11 +16,12 @@ button:hover { filter: brightness(1.1); }
 .status { font-size: .85rem; min-width: 8rem; }
 .status.ok { color: #c8e6c9; } .status.bad { color: #ffcdd2; }
 
-main { flex: 1; display: grid; grid-template-columns: 1fr 1fr; min-height: 0; }
+main { flex: 1; display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); min-height: 0; }
 .editor-pane { min-height: 0; border-right: 1px solid var(--border); }
 .CodeMirror { height: 100%; font-size: 14px; font-family: "JetBrains Mono", Menlo, Consolas, monospace; }
 .side-pane { display: flex; flex-direction: column; min-height: 0; background: var(--panel); }
-.tabs { display: flex; border-bottom: 1px solid var(--border); }
+.tabs { display: flex; border-bottom: 1px solid var(--border); overflow-x: auto; flex-shrink: 0; }
+.tabs button { white-space: nowrap; }
 .tabs button { background: transparent; border: none; border-bottom: 2px solid transparent; color: var(--muted); border-radius: 0; padding: .6rem 1rem; }
 .tabs button.active { color: var(--text); border-bottom-color: var(--accent); }
 .badge { background: var(--error); color: #fff; border-radius: 10px; padding: 0 .45rem; font-size: .75rem; margin-left: .3rem; }
@@ -52,8 +53,18 @@ td.kind-function, td.kind-method { color: #81d4fa; } td.kind-class { color: var(
 .tree .toggle { display: inline-block; width: 1rem; color: var(--muted); }
 .tree img { max-width: 100%; background: #fff; border-radius: 4px; }
 
+pre.code { margin: 0; tab-size: 4; font-family: "JetBrains Mono", Menlo, Consolas, monospace; font-size: .85rem; line-height: 1.45; white-space: pre; }
+pre.code .ln { color: var(--muted); user-select: none; }
+pre.code .fn { color: #81d4fa; font-weight: 600; } pre.code .lbl { color: var(--rule); }
+.muted { color: var(--muted); } .err { color: var(--error); }
+#runtime h3 { font-size: .95rem; margin: .3rem 0 .4rem; } #runtime h3 .muted { font-weight: 400; font-size: .8rem; }
+#runtime .card { border: 1px solid var(--border); border-radius: 4px; padding: .5rem .7rem; margin-bottom: .6rem; }
+#runtime ul.header { margin: .2rem 0 .5rem; padding-left: 1.1rem; font-size: .85rem; }
+#runtime code { color: var(--token); }
+
 .CodeMirror .error-line { background: rgba(239,83,80,.18); }
 .CodeMirror .error-gutter { color: var(--error); font-weight: bold; }
 .CodeMirror-gutters { border-right: 1px solid var(--border); }
 
-@media (max-width: 900px) { main { grid-template-columns: 1fr; grid-template-rows: 1fr 1fr; } .editor-pane { border-right: none; border-bottom: 1px solid var(--border); } }
+@media (max-width: 900px) { main { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 1fr) minmax(0, 1fr); } .editor-pane { border-right: none; border-bottom: 1px solid var(--border); } }
+#output { white-space: pre-wrap; }
