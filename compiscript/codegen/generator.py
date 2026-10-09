@@ -1,17 +1,13 @@
-"""Ensambla el generador de TAC a partir de los mixins de generación.
-
-Pendiente: agregar los mixins
-`ExpressionsGen`, `ControlFlowGen`, `FunctionsGen` y `ClassesGen` delante de
-`CodeGenBase`, igual que `SemanticAnalyzer` combina los mixins semánticos:
-
-    class TACGenerator(ClassesGen, ControlFlowGen, FunctionsGen, ExpressionsGen, CodeGenBase):
-        ...
-"""
+"""Generador TAC de Compiscript. Implementación: Felipe Aguilar."""
 
 from __future__ import annotations
 
 from .base import CodeGenBase
+from .classes import ClassesGen
+from .control_flow import ControlFlowGen
+from .expressions import ExpressionsGen
+from .functions import FunctionsGen
 
 
-class TACGenerator(CodeGenBase):
+class TACGenerator(ClassesGen, ControlFlowGen, FunctionsGen, ExpressionsGen, CodeGenBase):
     """Visitor que traduce un programa Compiscript ya validado a TAC."""
