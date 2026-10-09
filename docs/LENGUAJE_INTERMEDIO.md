@@ -464,6 +464,8 @@ Clase Perro : Animal  object_size = 20
 
 ```
 let p: Perro = new Perro("Fido");   t1 = new Perro, 20
+                                    param t1
+                                    call $init_Perro, 1       # atributos por instancia
                                     param t1                 # this
                                     param "Fido"
                                     call Animal_constructor, 2
@@ -492,6 +494,21 @@ print(a.hablar());                  t1 = method a, hablar    # vtable de a, ranu
 La ranura de cada método es la misma en toda la jerarquía
 (`ClassLayout.method_slot`). El constructor no está en la vtable: siempre se
 llama de forma directa.
+
+**Inicializadores por instancia — implementación de Felipe Aguilar.** Cada clase
+tiene una función interna `$init_Clase($this)`, fuera de la vtable. Primero llama
+al inicializador del padre y luego evalúa sus atributos y constantes en orden
+de declaración. Esto ocurre en cada `new`, antes de evaluar los argumentos y
+llamar al constructor propio o heredado. Declarar una clase no ejecuta sus
+inicializadores. Los atributos sin inicializador no generan asignaciones.
+
+Los inicializadores conservan el ámbito léxico de la clase, pueden leer atributos
+anteriores por su nombre y crean arreglos independientes para cada instancia.
+Una función interna, en vez de expandir el código en cada `new`, permite que un
+inicializador contenga otro `new` de su misma clase sin recursión del compilador.
+Estas funciones se registran en la tabla; después se recalculan direcciones y
+encabezados según sus llamadas y capturas, antes de emitir TAC. El prefijo `$`
+evita colisiones porque no es válido en identificadores de Compiscript.
 
 ### 7.14 Funciones, recursión y closures
 
@@ -525,6 +542,15 @@ function externa(n: integer): integer {
 ## 8. Supuestos generales
 
 * El TAC solo se genera para programas sin errores sintácticos ni semánticos.
+* Los operandos y argumentos se evalúan de izquierda a derecha. Una lectura de
+  variable se copia a un temporal si debe sobrevivir a otra expresión. Por
+  ejemplo, `x + (x = 4)` conserva el valor anterior de `x`.
+* Los argumentos se calculan antes de emitir el grupo `param ... call`; así las
+  llamadas anidadas no mezclan sus parámetros. El receptor y los valores vivos
+  durante una llamada permanecen en el marco del llamador.
+* El tipo esperado se propaga a los arreglos literales, incluso anidados y en
+  ternarios: `let xs: float[] = [1]` almacena `1.0`. Los arreglos ya existentes
+  conservan su referencia; no se copian al asignarlos.
 * `/` entre integers trunca hacia cero; `%` solo existe entre integers.
 * `==`/`!=` entre strings compara contenido; entre objetos/arreglos, identidad.
 * Las variables declaradas sin valor inicial no generan código (la semántica

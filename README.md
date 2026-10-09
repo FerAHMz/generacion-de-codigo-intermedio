@@ -26,6 +26,25 @@ make ide                         # IDE web en http://localhost:8080
 Con el mismo entorno Docker del curso: `make docker-build && make docker-shell`.
 Guía completa en [docs/EJECUCION.md](docs/EJECUCION.md).
 
+### Generar TAC desde Python
+
+La segunda pasada ya está disponible; la integración de TAC con CLI e IDE sigue
+pendiente en la porción de Fernando Rueda.
+
+```bash
+.venv/bin/python - <<'PY'
+from compiscript.codegen import compile_file
+
+resultado = compile_file("examples/03_clases_y_herencia.cps")
+if resultado.ok:
+    print(resultado.program.format())
+    print(resultado.table.format_runtime())
+else:
+    for error in resultado.errors:
+        print(error)
+PY
+```
+
 ## Qué valida
 
 | Grupo | Reglas |
@@ -56,7 +75,8 @@ compiscript/
   ir/                       TAC: cuádruplos y operandos (tac.py), temporales (temps.py),
                             vida de temporales y linear scan (liveness.py),
                             errores en tiempo de ejecución (runtime.py)
-  codegen/                  generador de TAC (base.py) y pipeline compile_source
+  codegen/                  pipeline compile_source y generador TAC por mixins:
+                            expressions, control_flow, functions y classes
   tree_viz.py               árbol en texto / LISP / JSON / Graphviz
 Driver.py                   línea de comandos
 ide/                        IDE web (Flask + CodeMirror)
@@ -80,7 +100,7 @@ Dockerfile, commands/, antlr-4.13.1-complete.jar   entorno Docker del curso
 | Integrante | Porción | Estado |
 |---|---|---|
 | Fernando Hernández | Preparación de la base, anotaciones para la segunda pasada, cuádruplos (`ir/tac.py`), temporales (`ir/temps.py`), vida de temporales y linear scan (`ir/liveness.py`), errores en ejecución (`ir/runtime.py`), direcciones / registros de activación por uso / layout de clases (`symbols.py`), esqueleto del generador (`codegen/base.py`), diseño del lenguaje intermedio y preparación para MIPS. | Terminado |
-| Felipe Aguilar | Generador de TAC: expresiones, booleanos con corto circuito, control de flujo, funciones y closures, clases. | Pendiente |
+| Felipe Aguilar | Generador de TAC: expresiones, booleanos con corto circuito, control de flujo, funciones y closures, clases e inicializadores por instancia. Pruebas de contrato en `tests/ir/test_codegen_base.py` e integración de ejemplos. | Terminado |
 | Fernando Rueda | Batería `tests/tac/`, intérprete de TAC, Driver (`--tac`, `--out`), IDE (`/api/compile`, pestañas de TAC y registros de activación), documentación final. | Pendiente |
 
 ### Proyecto 1 — Análisis semántico
