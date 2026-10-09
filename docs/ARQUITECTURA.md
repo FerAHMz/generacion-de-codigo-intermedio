@@ -2,26 +2,39 @@
 
 ## Visión general
 
+El compilador hace **dos pasadas sobre el mismo árbol** de ANTLR. La primera
+(Proyecto 1) valida tipos y ámbitos y deja anotado cada nodo; la segunda
+(Proyecto 2) usa esas anotaciones para emitir código de tres direcciones (TAC).
+Si la primera pasada encuentra errores, la segunda no se ejecuta.
+
 ```
- archivo.cps ──► CompiscriptLexer ──► CompiscriptParser ──► árbol sintáctico (ANTLR)
-                   (generados desde program/Compiscript.g4)          │
-                                                                      ▼
-                                                        SemanticAnalyzer (Visitor)
-                                                   ┌──────────┴──────────┐
-                                                   ▼                     ▼
-                                            SymbolTable            ErrorCollector
-                                       (entornos + símbolos)   (errores sintácticos
-                                                                 y semánticos)
-                                                   │                     │
-                              ┌────────────────────┼─────────────────────┤
-                              ▼                    ▼                     ▼
-                         Driver.py (CLI)     ide/ (Flask + web)    tests/ (pytest)
+ archivo.cps ──► Lexer/Parser (ANTLR) ──► árbol sintáctico
+                                              │
+                         ┌────────────────────┘
+                         ▼
+  Pasada 1   SemanticAnalyzer (compiscript/semantic/)
+             ├─ ErrorCollector: errores sintácticos y semánticos
+             ├─ SymbolTable: entornos y símbolos
+             └─ anotaciones: node_types, node_symbols, node_scopes
+                         │  (solo si no hay errores)
+                         ▼
+             SymbolTable.allocate_storage(): direcciones, etiquetas,
+             registros de activación por uso y layout de clases
+                         │
+                         ▼
+  Pasada 2   TACGenerator (compiscript/codegen/) ──► TACProgram (compiscript/ir/tac.py)
+                                                         │
+          ┌──────────────────────┬───────────────────────┼─────────────────────┐
+          ▼                      ▼                       ▼                     ▼
+   Driver.py (CLI)       ide/ (Flask + web)     ir/interp.py (ejecuta)   ir/liveness.py
+   --tac --out --run     /api/compile /api/run                           (vida + linear scan,
+                                                                          base de getReg en MIPS)
 ```
 
-El pipeline es **parsear → visitar → reportar**. Nunca se lanza una excepción
-por un error del programa fuente: todos se acumulan en `ErrorCollector` y se
-reportan juntos con línea y columna. Si hay errores sintácticos la fase
-semántica no se ejecuta (el árbol estaría incompleto y generaría ruido).
+El punto de entrada para todo lo que consume TAC es `compile_source` /
+`compile_file` (`compiscript/codegen/__init__.py`), que devuelve un
+`CompileResult` con `errors`, `program` (`None` si hubo errores), `table` y
+`to_dict()` (el JSON que usa el IDE).
 
 ## Módulos
 
@@ -35,9 +48,11 @@ semántica no se ejecuta (el árbol estaría incompleto y generaría ruido).
 | `compiscript/symbols.py` | Símbolos, entornos (`Scope`) y `SymbolTable`. |
 | `compiscript/semantic/` | Visitor semántico, dividido en mixins por área de reglas. |
 | `compiscript/tree_viz.py` | Árbol en texto, LISP, JSON y Graphviz DOT/SVG. |
-| `Driver.py` | Interfaz de línea de comandos. |
+| `compiscript/ir/` | Representación intermedia: cuádruplos (`tac.py`), temporales (`temps.py`), vida de temporales y linear scan (`liveness.py`), errores en ejecución (`runtime.py`) e intérprete (`interp.py`). |
+| `compiscript/codegen/` | Segunda pasada: `CodeGenBase` (`base.py`) y mixins de generación (`expressions`, `control_flow`, `functions`, `classes`) combinados en `TACGenerator`. |
+| `Driver.py` | Interfaz de línea de comandos (análisis, TAC, registros de activación y ejecución). |
 | `ide/` | IDE web (Flask + CodeMirror). |
-| `tests/` | Batería de pruebas (pytest), un archivo por grupo de reglas. |
+| `tests/` | Batería de pruebas (pytest): `tests/test_*.py` (semántica), `tests/ir/` (TAC, tabla, temporales, intérprete) y `tests/tac/` (Driver, IDE y extremo a extremo). |
 | `examples/` | Programas válidos e inválidos usados por el IDE y los tests. |
 
 ## Sistema de tipos (`types.py`)
@@ -142,13 +157,106 @@ un `if` no hace muerto lo que sigue al `if`.
 
 ## IDE (`ide/`)
 
-* **Backend** (`app.py`): Flask. `POST /api/analyze` devuelve errores, filas de
-  la tabla de símbolos, entornos y el árbol en JSON. `POST /api/tree.svg`
-  genera la imagen con Graphviz. `GET /api/examples` sirve `examples/`.
+* **Backend** (`app.py`): Flask.
+  * `POST /api/analyze`: errores, filas de la tabla de símbolos, entornos y el
+    árbol en JSON (Proyecto 1).
+  * `POST /api/compile`: `CompileResult.to_dict()` → `{"errors", "tac",
+    "symbols"}`; `symbols` trae `activation_records` (encabezado con el uso de
+    cada campo, slots y `frame_size`) y `classes` (atributos y vtable). Con
+    errores, `tac` es una lista vacía.
+  * `POST /api/run`: compila y ejecuta el TAC con el intérprete; devuelve la
+    salida de los `print` y, si lo hay, el error en ejecución. Usa un límite de
+    pasos para que un bucle infinito no bloquee el servidor.
+  * `POST /api/tree.svg` genera la imagen con Graphviz y `GET /api/examples`
+    sirve `examples/`.
 * **Frontend** (`static/`): CodeMirror con resaltado, marcadores de error en el
-  gutter y la línea, pestañas de errores (clic → salta a la línea), tabla de
-  símbolos y árbol colapsable con el tipo de cada expresión. El análisis se
-  ejecuta en vivo mientras se escribe.
+  gutter y la línea, y pestañas: errores (clic → salta a la línea), **código
+  intermedio** (TAC numerado), **registros de activación** (un cuadro por
+  función con su encabezado por uso y el layout de cada clase), **salida**
+  (botón *Ejecutar TAC*), tabla de símbolos y árbol colapsable. El análisis y
+  la generación se ejecutan en vivo mientras se escribe.
+
+## Segunda pasada: código intermedio
+
+### Representación (`ir/tac.py`)
+
+Cada instrucción es un `Quad(op, arg1, arg2, result)` con operandos tipados
+(`Temp`, `Var`, `Const`, `Label`, `Field`), no texto. Así el intérprete, el
+análisis de vida y la futura traducción a MIPS trabajan sobre objetos y no
+vuelven a parsear cadenas. `Var` guarda su dirección (`global[8]`, `fp[+8]`,
+`fp[-4]`) y `hops` (static links a seguir en closures); `Temp` y `Var` llevan
+su tipo para separar registros enteros y flotantes. `TACProgram.check()`
+verifica etiquetas únicas, saltos a etiquetas existentes y `func_begin`/
+`func_end` balanceados. El conjunto de instrucciones y los esquemas de
+traducción están en [LENGUAJE_INTERMEDIO.md](LENGUAJE_INTERMEDIO.md).
+
+### Tabla de símbolos para tiempo de ejecución (`symbols.py`)
+
+`SymbolTable.allocate_storage()` se ejecuta al terminar la pasada semántica:
+
+* **Direcciones:** globales en el área estática, parámetros en `fp[+off]`,
+  locales (bloques anidados aplanados) en `fp[-off]`, atributos como
+  desplazamiento dentro del objeto. Tamaños de MIPS32 (`boolean` = 1 B, el
+  resto 4 B), con alineación.
+* **Registros de activación por uso** (`ActivationRecord`): el encabezado no
+  es fijo. El control link está en todas las funciones salvo `main`; la
+  dirección de retorno solo si la función llama a otras (`FunctionSymbol.calls`,
+  grafo de llamadas de la pasada 1); el static link solo si la función o una
+  anidada lee variables de una función externa, o llama a una función que lo
+  necesita (punto fijo sobre el grafo de llamadas). `level` es la profundidad
+  léxica (`main` = 0). Los temporales ocupan una ranura cada uno, al final del
+  marco.
+* **Layout de clases** (`ClassLayout`): `[obj + 0]` apunta a la vtable;
+  atributos heredados con los mismos offsets que en el padre; un método
+  sobreescrito reemplaza la etiqueta en la misma ranura de la vtable.
+
+### Generador (`codegen/`)
+
+`CodeGenBase` es un visitor del árbol que ofrece la infraestructura: emisión,
+etiquetas únicas, un búfer y un `TempAllocator` por función
+(`with self.function(record)`), pila de destinos de `break`/`continue` y de
+manejadores de `try` (emite los `pop_handler` necesarios en salidas
+anticipadas). `TACGenerator` combina los mixins:
+
+| Mixin | Traduce |
+|---|---|
+| `expressions.py` | literales, variables, aritmética, `concat`, `int_to_float`, asignaciones, arreglos, booleanos con corto circuito (`gen_cond` con etiquetas heredadas y fall-through) |
+| `control_flow.py` | `if`, `while`, `do-while`, `for`, `foreach`, `switch`, `break`/`continue`, `try/catch` |
+| `functions.py` | declaración de funciones, `param`/`call`, `return` |
+| `classes.py` | `new`, inicializadores por instancia (`$init_Clase`), constructor, despacho dinámico con `method` |
+
+### Temporales
+
+* **Al generar** (`ir/temps.py`): free-list que siempre entrega el temporal
+  libre de menor número; los operandos se liberan antes de pedir el temporal
+  del resultado (`t1 = t1 + c`). La cantidad de temporales distintos de cada
+  función (`max_live`) define las ranuras del marco.
+* **Sobre el TAC** (`ir/liveness.py`): análisis de vida hacia atrás sobre el
+  grafo de flujo de cada función e intervalos de vida por valor, y asignación
+  de registros por *linear scan* (Poletto y Sarkar, 1999), con spill del
+  intervalo que termina más tarde. Es la base de `getReg()` para la fase de
+  MIPS.
+
+### Intérprete (`ir/interp.py`)
+
+Ejecuta el TAC para comprobar que la traducción conserva el significado del
+programa (`tests/tac/test_e2e.py`) y fija la semántica que tendrá que respetar
+la fase de MIPS:
+
+* memoria por dirección: un diccionario para el área global y uno por marco;
+  una `Var` con `hops = k` sigue `k` static links desde el marco actual;
+* un marco por llamada con su `ActivationRecord`, sus temporales, control link
+  y static link (desde el llamador de nivel `p` hacia el llamado de nivel `q`
+  se siguen `p - q + 1` enlaces, como en §6 de LENGUAJE_INTERMEDIO.md);
+* heap de arreglos (`alloc`, `len`, `[]`, `[]=`) y objetos (`new` guarda la
+  clase; `method` busca la etiqueta en `table.class_layouts[...].vtable`);
+* enteros de 32 bits en complemento a dos y `/` entera que trunca hacia cero;
+* antes de cada instrucción revisa `runtime.checks_for(op)`; un error salta
+  al manejador más reciente (`push_handler`), descartando los marcos y los
+  `param` pendientes de las funciones llamadas dentro del `try`, y `x =
+  exception` recibe el mensaje. Sin manejador, el programa termina y el
+  mensaje queda como última línea de salida;
+* un límite de pasos (`max_steps`) detiene programas que no terminan.
 
 ## Árbol sintáctico (`tree_viz.py`)
 
@@ -169,5 +277,10 @@ representaciones gráficas se colapsan las cadenas de reglas con un solo hijo
 * La variable de `catch` se tipa como `string`.
 * Una variable declarada sin valor debe recibir una asignación antes de leerse
   (análisis independiente del flujo: basta una asignación previa en el código).
+* No se genera TAC para programas con errores: la pasada 2 supone un árbol
+  válido y completamente anotado.
+* Despacho dinámico por vtable para métodos (una variable `Animal` puede
+  contener un `Perro`) y static link para closures (una función anidada nunca
+  sobrevive al marco que la contiene).
 * Los archivos generados por ANTLR se versionan para que el proyecto corra sin
   Java; `make grammar` los regenera si la gramática cambia.
