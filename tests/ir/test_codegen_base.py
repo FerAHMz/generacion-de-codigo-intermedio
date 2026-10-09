@@ -191,3 +191,135 @@ def test_temporales_llevan_tipo_para_elegir_registros():
         assert g.emit_binary(Op.MUL, f, Const(2.0)).is_float
         assert g.emit_binary(Op.LT, n, Const(3)).type == BOOLEAN
         assert g.coerce(n, INTEGER, FLOAT).is_float
+
+
+# Contratos públicos del generador completo — Felipe Aguilar.
+def compiled(source):
+    result = compile_source(source)
+    assert result.ok, [str(e) for e in result.errors]
+    assert result.program.check() == []
+    return result
+
+
+@pytest.mark.parametrize("condition", ["ok", "!ok", "ok && !ok", "ok || !ok", "(ok)"])
+def test_condiciones_tienen_operandos_booleanos(condition):
+    result = compiled(f"let ok = true; if ({condition}) {{ print(1); }}")
+    branches = [q for q in result.program if q.op in (Op.IF, Op.IF_FALSE)]
+    assert branches
+    assert all(isinstance(q.arg1, (Var, Temp, Const)) for q in branches)
+
+
+@pytest.mark.parametrize("expression, shortcut", [("false && f()", False), ("true || f()", True)])
+def test_corto_circuito_salta_la_llamada(expression, shortcut):
+    result = compiled(f"function f(): boolean {{ return true; }} print({expression});")
+    code = result.program.quads
+    call = next(i for i, q in enumerate(code) if q.op == Op.CALL)
+    jump = next(q for q in code[:call] if q.op == Op.GOTO)
+    destination = next(i for i, q in enumerate(code) if q.op == Op.LABEL and q.result == jump.result)
+    assert destination > call
+    assert any(q.op == Op.ASSIGN and q.arg1 == Const(shortcut) for q in code[destination:])
+
+
+def test_operando_izquierdo_se_conserva_antes_de_asignar_el_derecho():
+    result = compiled("let x=1; print(x + (x=4));")
+    code = result.program.quads
+    saved = next(q for q in code if q.op == Op.ASSIGN and isinstance(q.arg1, Var))
+    mutation = next(q for q in code if q.op == Op.ASSIGN and q.arg1 == Const(4))
+    addition = next(q for q in code if q.op == Op.ADD)
+    assert code.index(saved) < code.index(mutation) < code.index(addition)
+    assert addition.arg1 == saved.result
+
+
+def test_llamadas_anidadas_no_mezclan_parametros():
+    result = compiled("function f(a:integer,b:integer):integer{return a+b;} print(f(1,f(2,3)));")
+    pending = []
+    groups = []
+    for q in result.program:
+        if q.op == Op.PARAM:
+            pending.append(q.arg1)
+        if q.op == Op.CALL:
+            assert len(pending) == q.arg2.value
+            groups.append(pending)
+            pending = []
+    assert groups[0] == [Const(2), Const(3)]
+    assert groups[1][0] == Const(1) and isinstance(groups[1][1], Temp)
+
+
+def test_arreglos_float_promueven_literales_anidados_argumentos_y_retornos():
+    result = compiled('''
+        function f(a:float[]):float[] { return [3]; }
+        let xs:float[][] = [[1], [2]];
+        let ys = f([4]);
+    ''')
+    values = [q.arg2.value for q in result.program
+              if q.op == Op.INDEX_SET and isinstance(q.arg2, Const)]
+    assert sorted(values) == [1.0, 2.0, 3.0, 4.0]
+    assert all(type(v) is float for v in values)
+
+
+def test_temporales_reciclados_y_capturas_en_el_tac_publico():
+    result = compiled('''
+        function f(n:integer):integer {
+            function g():integer { return n+1+2+3; }
+            return g();
+        }
+        print(f(4));
+    ''')
+    captured = [o for q in result.program for o in q.operands() if isinstance(o, Var) and o.name == "n"]
+    assert captured and all(o.hops == 1 for o in captured)
+    inner = next(ar for ar in result.table.activation_records if ar.name == "g")
+    assert inner.temp_count == 1
+    assert inner.needs_static_link
+
+
+def test_inicializadores_por_instancia_herencia_y_despacho_virtual():
+    result = compiled('''
+        class A { let x=1; function constructor() {} function f():integer{return this.x;} }
+        class B:A { let y=2; function f():integer{return this.y;} }
+        let a:A=new B(); let b=new B(); print(a.f());
+    ''')
+    bodies = {}
+    for q in result.program:
+        if q.op == Op.FUNC_BEGIN:
+            body = bodies[q.arg1.name] = []
+        else:
+            body.append(q)
+    main = bodies["main"]
+    calls = [q for q in main if q.op == Op.CALL and isinstance(q.arg1, Label)]
+    constructor = result.table.class_layouts["B"].constructor_label
+    assert [q.arg1.name for q in calls[1::2]] == [constructor, constructor]
+    assert calls[0].arg1 == calls[2].arg1
+    derived_init = bodies[calls[0].arg1.name]
+    parent_call = next(q for q in derived_init if q.op == Op.CALL)
+    own_field = next(q for q in derived_init if q.op == Op.FIELD_SET)
+    assert derived_init.index(parent_call) < derived_init.index(own_field)
+    assert any(q.op == Op.FIELD_SET for q in bodies[parent_call.arg1.name])
+    assert not any(q.op == Op.FIELD_SET for q in main)
+    assert any(q.op == Op.METHOD and q.arg2 == Label("f") for q in main)
+    assert result.table.class_layouts["A"].method_label("f") != result.table.class_layouts["B"].method_label("f")
+
+
+def test_closure_de_metodo_captura_el_receptor_implicito():
+    result = compiled('''
+        class A {
+            let x=3;
+            function f():integer {
+                function g():integer { return x; }
+                return g();
+            }
+        }
+        print(new A().f());
+    ''')
+    reads = [q for q in result.program if q.op == Op.FIELD_GET]
+    assert len(reads) == 1 and reads[0].arg1.hops == 1
+    closure = next(ar for ar in result.table.activation_records if ar.name == "g")
+    assert closure.needs_static_link
+
+
+@pytest.mark.parametrize("statement", ["break;", "continue;", "return;"])
+def test_salidas_anticipadas_desapilan_handlers(statement):
+    result = compiled(f"function f() {{ while(true) {{ try {{ {statement} }} catch(e) {{ print(e); }} }} }} f();")
+    code = result.program.quads
+    first_pop = next(i for i, q in enumerate(code) if q.op == Op.POP_HANDLER)
+    assert code[first_pop-1].op == Op.PUSH_HANDLER
+    assert code[first_pop+1].op == (Op.RETURN if statement == "return;" else Op.GOTO)
