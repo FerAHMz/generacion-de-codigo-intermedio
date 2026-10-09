@@ -19,6 +19,9 @@ El diseño del lenguaje intermedio está en [docs/LENGUAJE_INTERMEDIO.md](docs/L
 ```bash
 make venv                        # crea .venv e instala dependencias
 make run F=program/program.cps   # analiza un archivo (.cps)
+.venv/bin/python Driver.py program/program.cps --tac       # imprime el TAC numerado
+.venv/bin/python Driver.py program/program.cps --runtime   # registros de activación y clases
+.venv/bin/python Driver.py program/program.cps --run       # ejecuta el TAC con el intérprete
 make test                        # batería de tests (pytest)
 make ide                         # IDE web en http://localhost:8080
 ```
@@ -26,19 +29,18 @@ make ide                         # IDE web en http://localhost:8080
 Con el mismo entorno Docker del curso: `make docker-build && make docker-shell`.
 Guía completa en [docs/EJECUCION.md](docs/EJECUCION.md).
 
-### Generar TAC desde Python
-
-La segunda pasada ya está disponible; la integración de TAC con CLI e IDE sigue
-pendiente en la porción de Fernando Rueda.
+### Generar y ejecutar TAC desde Python
 
 ```bash
 .venv/bin/python - <<'PY'
 from compiscript.codegen import compile_file
+from compiscript.ir.interp import run
 
 resultado = compile_file("examples/03_clases_y_herencia.cps")
 if resultado.ok:
     print(resultado.program.format())
     print(resultado.table.format_runtime())
+    print(run(resultado.program, resultado.table))   # salida del programa
 else:
     for error in resultado.errors:
         print(error)
@@ -74,15 +76,17 @@ compiscript/
                             functions, control_flow, classes)
   ir/                       TAC: cuádruplos y operandos (tac.py), temporales (temps.py),
                             vida de temporales y linear scan (liveness.py),
-                            errores en tiempo de ejecución (runtime.py)
+                            errores en tiempo de ejecución (runtime.py),
+                            intérprete de TAC (interp.py)
   codegen/                  pipeline compile_source y generador TAC por mixins:
                             expressions, control_flow, functions y classes
   tree_viz.py               árbol en texto / LISP / JSON / Graphviz
-Driver.py                   línea de comandos
-ide/                        IDE web (Flask + CodeMirror)
-tests/                      batería de tests por grupo de reglas (tests/ir: TAC y tabla)
+Driver.py                   línea de comandos (--tac, --out, --runtime, --run)
+ide/                        IDE web (Flask + CodeMirror): TAC, registros de activación y ejecución
+tests/                      batería de tests por grupo de reglas (tests/ir: TAC, tabla e
+                            intérprete; tests/tac: Driver, IDE y extremo a extremo)
 examples/                   programas válidos (NN_*.cps) y con errores (err_*.cps)
-docs/                       ARQUITECTURA.md y EJECUCION.md
+docs/                       arquitectura, ejecución, lenguaje intermedio y rúbricas
 Dockerfile, commands/, antlr-4.13.1-complete.jar   entorno Docker del curso
 ```
 
@@ -91,7 +95,8 @@ Dockerfile, commands/, antlr-4.13.1-complete.jar   entorno Docker del curso
 * [Lenguaje intermedio: instrucciones, convenciones y esquemas](docs/LENGUAJE_INTERMEDIO.md)
 * [Arquitectura de la implementación](docs/ARQUITECTURA.md)
 * [Cómo ejecutar el compilador](docs/EJECUCION.md)
-* [Mapa de la rúbrica: regla → tests → demo](docs/RUBRICA_TESTS.md)
+* [Rúbrica del Proyecto 2: requisito → archivo → tests → demo](docs/RUBRICA_TAC.md)
+* [Rúbrica del Proyecto 1: regla → tests → demo](docs/RUBRICA_TESTS.md)
 
 ## División del trabajo
 
@@ -101,7 +106,7 @@ Dockerfile, commands/, antlr-4.13.1-complete.jar   entorno Docker del curso
 |---|---|---|
 | Fernando Hernández | Preparación de la base, anotaciones para la segunda pasada, cuádruplos (`ir/tac.py`), temporales (`ir/temps.py`), vida de temporales y linear scan (`ir/liveness.py`), errores en ejecución (`ir/runtime.py`), direcciones / registros de activación por uso / layout de clases (`symbols.py`), esqueleto del generador (`codegen/base.py`), diseño del lenguaje intermedio y preparación para MIPS. | Terminado |
 | Felipe Aguilar | Generador de TAC: expresiones, booleanos con corto circuito, control de flujo, funciones y closures, clases e inicializadores por instancia. Pruebas de contrato en `tests/ir/test_codegen_base.py` e integración de ejemplos. | Terminado |
-| Fernando Rueda | Batería `tests/tac/`, intérprete de TAC, Driver (`--tac`, `--out`), IDE (`/api/compile`, pestañas de TAC y registros de activación), documentación final. | Pendiente |
+| Fernando Rueda | Intérprete de TAC con marcos, static link, heap y excepciones (`ir/interp.py`), Driver (`--tac`, `--out`, `--runtime`, `--run`), IDE (`/api/compile`, `/api/run`, pestañas de TAC, registros de activación y salida), batería `tests/tac/` (Driver, IDE y extremo a extremo) y documentación final (arquitectura, ejecución y rúbrica). | Terminado |
 
 ### Proyecto 1 — Análisis semántico
 
