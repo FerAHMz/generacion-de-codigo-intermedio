@@ -1,10 +1,10 @@
 # Lenguaje intermedio: código de tres direcciones (TAC)
 
-> **Estado:** versión inicial (diseño). Define las instrucciones, convenciones y
-> esquemas de traducción que implementa el generador (`compiscript/codegen/`).
-> Las secciones marcadas con **(esquema)** describen la traducción que deben
-> producir los mixins de generación; cuando estén implementados, los ejemplos se
-> reemplazarán por la salida real del compilador.
+> Documentación del generador implementado (`compiscript/codegen/`). La sección 7
+> contiene programas completos y su salida real de `compile_source`, sin
+> numeración ni optimizaciones posteriores. La sección 9 describe las
+> convenciones previstas para la futura generación de MIPS, no código MIPS
+> generado por esta fase.
 
 ## 1. Visión general
 
@@ -141,18 +141,21 @@ el grafo de llamadas que registra la fase semántica (`FunctionSymbol.calls`).
   generador guarda `TempAllocator.max_live` en el registro y corrige el
   `frame_size` de `func_begin`.
 
-Volcado de ejemplo (`SymbolTable.format_runtime()`):
+Extractos reales de `res.table.format_runtime()` después de generar los ejemplos
+de factorial y closure de §7.14 (se omiten los otros registros):
 
 ```
-Registro de activación fact (nivel 1) frame_size = 12
+Registro de activación fact (nivel 1) frame_size = 20
   fp[+8]         param n: integer (4 B)
   fp[+4]         dirección de retorno (4 B)
   fp[+0]         control link (fp anterior) (4 B)
+  fp[-4]         temporal t1 (4 B)
+  fp[-8]         temporal t2 (4 B)
 
-Registro de activación externa_media (nivel 2, static link -> externa) frame_size = 12
-  fp[+8]         static link -> externa (4 B)
-  fp[+4]         dirección de retorno (4 B)
+Registro de activación externa_interna (nivel 2, static link -> externa) frame_size = 12
+  fp[+4]         static link -> externa (4 B)
   fp[+0]         control link (fp anterior) (4 B)
+  fp[-4]         temporal t1 (4 B)
 ```
 
 ### 4.4 Etiquetas
@@ -179,7 +182,10 @@ El reciclaje se hace en dos niveles.
 Como siempre se reutiliza el menor libre, los nombres usados son exactamente
 `t1 … t{max_live}`: `max_live` es la cantidad de ranuras de temporales del marco.
 
-| `x = a + b + c + d` sin reciclaje | con reciclaje |
+Comparación conceptual del reciclaje para `x = a + b + c + d` (no es un
+volcado del compilador; se omite la copia inicial de `a`):
+
+| Sin reciclaje | Con reciclaje |
 |---|---|
 | `t1 = a + b` | `t1 = a + b` |
 | `t2 = t1 + c` | `t1 = t1 + c` |
@@ -187,14 +193,14 @@ Como siempre se reutiliza el menor libre, los nombres usados son exactamente
 | `x = t3` | `x = t1` |
 | 3 temporales | `max_live = 1` |
 
-`(a + b) * (c + d)` necesita `max_live = 2`: `t1 = a + b`, `t2 = c + d`,
-`t1 = t1 * t2`.
+`(a + b) * (c + d)` necesita `max_live = 2`. El generador también copia `a` y
+`c` antes de evaluar el operando derecho, conservando el orden de evaluación.
+En §7.1 se muestra una salida completa con esas copias.
 
 ### 5.2 Sobre el TAC: vida + linear scan (`compiscript/ir/liveness.py`)
 
 Basado en M. Poletto y V. Sarkar, *Linear Scan Register Allocation*, ACM
-TOPLAS 21(5), 1999 (por confirmar con el profesor que es el paper del MIT que
-recomendó):
+TOPLAS 21(5), 1999:
 
 1. **Vida:** análisis de flujo de datos hacia atrás sobre el grafo de flujo de
    cada función (`goto`, saltos condicionales, `return`, y `push_handler` con
@@ -237,23 +243,58 @@ t1 = call f, n        # o `call f, n` si es void
   lo recibe. `func_end` equivale a `return` sin valor.
 * **Recursión:** cada llamada crea un marco nuevo; no requiere nada especial.
 
-## 7. Esquemas de traducción **(esquema)**
+## 7. Ejemplos de traducción: salida real del compilador
 
-En adelante `E.place` es el operando que devuelve `gen_expr(E)` y
-`cond(E, Lt, Lf)` es `gen_cond`: código de saltos que va a `Lt` si `E` es
-verdadera y a `Lf` si es falsa; un destino `fall` significa "seguir con la
-instrucción siguiente".
+Cada bloque `cps` es un programa independiente; el bloque `tac` siguiente es su
+salida completa, incluidos `main`, temporales, etiquetas y tamaños de marco.
+Para reproducirla desde la raíz del repositorio, guarde el bloque fuente en
+`ejemplo.cps` y ejecute:
+
+```bash
+.venv/bin/python - <<'PY'
+from pathlib import Path
+from compiscript.codegen import compile_source
+
+res = compile_source(Path("ejemplo.cps").read_text(encoding="utf-8"))
+assert res.ok, [str(error) for error in res.errors]
+assert res.program.check() == []
+print(res.program.format(numbered=False))
+PY
+```
+
+No se aplica `compact_temps` ni se eliminan instrucciones redundantes. Las
+etiquetas se numeran por programa, y los temporales se reciclan por función.
+Cambiar el fuente puede cambiar ambos nombres y el tamaño del marco.
+Los bloques `if` llevan llaves, como exige `program/Compiscript.g4`.
+
+La prueba `test_documentacion_tac_coincide_con_el_compilador` en
+`tests/test_examples.py` compila estos bloques y compara la salida completa.
+Se ejecuta con `make test`, junto con el resto de la batería.
 
 ### 7.1 Expresiones aritméticas y precedencia
 
 La gramática ya codifica la precedencia; las cadenas `a op b op c` se evalúan de
-izquierda a derecha.
+izquierda a derecha. Las copias de `a` y `b` conservan sus valores antes de
+evaluar los operandos derechos.
 
+```cps
+let a = 2; let b = 3; let c = 4; let d = 5;
+let x = a + b * c - d;
 ```
-x = a + b * c - d          t1 = b * c
-                           t1 = a + t1
-                           t1 = t1 - d
-                           x = t1
+
+```tac
+func_begin main, 8
+    a = 2
+    b = 3
+    c = 4
+    d = 5
+    t1 = a
+    t2 = b
+    t2 = t2 * c
+    t1 = t1 + t2
+    t1 = t1 - d
+    x = t1
+func_end main
 ```
 
 ### 7.2 float e `int_to_float`
@@ -263,25 +304,45 @@ operación mixta, asignación/inicialización de un float con un integer, argume
 integer a parámetro float, `return` integer en función float y elementos de un
 arreglo float. Una constante entera se convierte en compilación.
 
+```cps
+let n = 4;
+let f: float = n * 2.5;
+let g: float = 3;
 ```
-let f: float = n * 2.5;    t1 = int_to_float n
-                           t1 = t1 * 2.5
-                           f = t1
-let g: float = 3;          g = 3.0
+
+```tac
+func_begin main, 4
+    n = 4
+    t1 = n
+    t1 = int_to_float t1
+    t1 = t1 * 2.5
+    f = t1
+    g = 3.0
+func_end main
 ```
 
 ### 7.3 Strings
 
 `+` con algún operando string genera `concat` (convierte el otro operando):
 
+```cps
+let n = 4;
+print("n = " + n);
 ```
-print("n = " + n);         t1 = concat "n = ", n
-                           print t1
+
+```tac
+func_begin main, 4
+    n = 4
+    t1 = concat "n = ", n
+    print t1
+func_end main
 ```
 
 ### 7.4 Booleanos: código de saltos con corto circuito
 
-Se usan **etiquetas heredadas** con fall-through:
+Se usan **etiquetas heredadas** con fall-through. La tabla resume el algoritmo,
+no un volcado: `cond(E, Lt, Lf)` representa `gen_cond`, y `fall` indica continuar
+con la instrucción siguiente. `a` y `b` representan operandos ya evaluados.
 
 | E | `cond(E, Lt, Lf)` |
 |---|---|
@@ -292,87 +353,203 @@ Se usan **etiquetas heredadas** con fall-through:
 | `true` / `false` | `goto Lt` / `goto Lf` (o nada si es `fall`) |
 | variable booleana `b` | `if b goto Lt` / `ifFalse b goto Lf` |
 
+```cps
+let a = 1; let b = 2; let c = 3; let d = 4;
+if (a < b && c != d) { print(1); }
 ```
-if (a < b && c != d) { print(1); }      if a >= b goto L1
-                                        if c == d goto L1
-                                        print 1
-                                      L1:
+
+```tac
+func_begin main, 4
+    a = 1
+    b = 2
+    c = 3
+    d = 4
+    t1 = a
+    if t1 >= b goto L1
+    t1 = c
+    if t1 == d goto L1
+    print 1
+L1:
+func_end main
 ```
 
 Si se necesita el **valor** (`let ok = a < b || c;`): una comparación simple
 usa `t = a < b`; con `&&`, `||` o `!` se materializa con saltos:
 
+```cps
+let a = 1; let b = 2; let c = false;
+let ok = a < b || c;
+print(ok);
 ```
-    cond(E, fall, Lf)
+
+```tac
+func_begin main, 4
+    a = 1
+    b = 2
+    c = false
+    t1 = a
+    if t1 < b goto L3
+    ifFalse c goto L1
+L3:
     t1 = true
-    goto Lend
-Lf: t1 = false
-Lend:
+    goto L2
+L1:
+    t1 = false
+L2:
+    ok = t1
+    print ok
+func_end main
 ```
 
 ### 7.5 if / else
 
+```cps
+let x = 2;
+if (x > 1) { print("mayor"); } else { print("menor o igual"); }
 ```
-if (E) S1 else S2        cond(E, fall, Lelse)
-                         S1
-                         goto Lend
-                       Lelse:
-                         S2
-                       Lend:
+
+```tac
+func_begin main, 4
+    x = 2
+    t1 = x
+    if t1 <= 1 goto L1
+    print "mayor"
+    goto L2
+L1:
+    print "menor o igual"
+L2:
+func_end main
 ```
 
 ### 7.6 while, do-while, for
 
-```
-while (E) S              Lcond:                 do S while (E);     Linicio:
-                           cond(E, fall, Lend)                        S
-                           S                                        Lcont:
-                           goto Lcond                                 cond(E, Linicio, fall)
-                         Lend:                                      Lend:
+**while:** comprueba la condición antes del cuerpo. `continue` vuelve a `L1`.
 
-for (init; E; upd) S     init
-                       Lcond:
-                         cond(E, fall, Lend)
-                         S
-                       Lcont:                   # destino de continue
-                         upd
-                         goto Lcond
-                       Lend:                    # destino de break
+```cps
+let i = 0;
+while (i < 2) { i = i + 1; }
 ```
 
-`continue` en un `while` salta a `Lcond`; en `for`, a `Lcont` (para ejecutar la
-actualización).
+```tac
+func_begin main, 4
+    i = 0
+L1:
+    t1 = i
+    if t1 >= 2 goto L2
+    t1 = i
+    t1 = t1 + 1
+    i = t1
+    goto L1
+L2:
+func_end main
+```
+
+**do-while:** ejecuta el cuerpo antes de comprobar la condición. `continue`
+va a `L2`, donde se evalúa esa condición.
+
+```cps
+let i = 2;
+do { i = i - 1; } while (i > 0);
+```
+
+```tac
+func_begin main, 4
+    i = 2
+L1:
+    t1 = i
+    t1 = t1 - 1
+    i = t1
+L2:
+    t1 = i
+    if t1 > 0 goto L1
+L3:
+func_end main
+```
+
+**for:** `continue` va a `L2` para ejecutar la actualización; `break` va a `L3`.
+
+```cps
+for (let i = 0; i < 2; i = i + 1) { print(i); }
+```
+
+```tac
+func_begin main, 4
+    i = 0
+L1:
+    t1 = i
+    if t1 >= 2 goto L3
+    print i
+L2:
+    t1 = i
+    t1 = t1 + 1
+    i = t1
+    goto L1
+L3:
+func_end main
+```
 
 ### 7.7 foreach (índice oculto)
 
-```
-foreach (x in xs) S      t1 = 0                 # índice oculto
-                         t2 = len xs
-                       Lcond:
-                         if t1 >= t2 goto Lend
-                         x = xs[t1]
-                         S
-                       Lcont:
-                         t1 = t1 + 1
-                         goto Lcond
-                       Lend:
+```cps
+let xs = [10, 20];
+foreach (x in xs) { print(x); }
 ```
 
-`t1`/`t2` permanecen vivos durante todo el bucle (no se liberan hasta `Lend`);
-como los temporales viven en el marco, sobreviven a llamadas dentro de `S`.
+```tac
+func_begin main, 12
+    t1 = alloc 2
+    t1[0] = 10
+    t1[1] = 20
+    xs = t1
+    t1 = xs
+    t2 = 0
+    t3 = len t1
+L1:
+    if t2 >= t3 goto L3
+    x = t1[t2]
+    print x
+L2:
+    t2 = t2 + 1
+    goto L1
+L3:
+func_end main
+```
+
+`t1` conserva la referencia del arreglo, `t2` el índice y `t3` la longitud.
+Permanecen vivos durante todo el bucle y sobreviven a llamadas dentro del
+cuerpo. Reasignar `xs` no cambia el arreglo recorrido.
 
 ### 7.8 switch (cadena de comparaciones, fallthrough)
 
+```cps
+let x = 2;
+switch (x) {
+  case 1: print("uno");
+  case 2: print("dos"); break;
+  default: print("otro");
+}
 ```
-switch (E) {             t1 = E.place
-  case c1: S1            if t1 == c1 goto Lc1
-  case c2: S2            if t1 == c2 goto Lc2
-  default: S3            goto Ldef               # o Lend si no hay default
-}                      Lc1: S1                   # sin break cae al siguiente caso
-                       Lc2: S2
-                       Ldef: S3
-                       Lend:                     # destino de break
+
+```tac
+func_begin main, 4
+    x = 2
+    t1 = x
+    if t1 == 1 goto L2
+    if t1 == 2 goto L3
+    goto L4
+L2:
+    print "uno"
+L3:
+    print "dos"
+    goto L1
+L4:
+    print "otro"
+L1:
+func_end main
 ```
+
+Sin `break`, el primer caso continúa al segundo sin volver a evaluar sus
+comparaciones. El valor del `switch` se evalúa una sola vez.
 
 ### 7.9 break / continue
 
@@ -380,29 +557,80 @@ El generador mantiene una pila de destinos (`breakable`): cada bucle registra
 `(Lend, Lcont)` y cada `switch` registra `(Lend, —)`. `break` usa el tope;
 `continue` busca el bucle más interno, atravesando los `switch`.
 
+```cps
+let i = 0;
+while (i < 3) {
+  i = i + 1;
+  if (i == 1) { continue; }
+  break;
+}
+```
+
+```tac
+func_begin main, 4
+    i = 0
+L1:
+    t1 = i
+    if t1 >= 3 goto L2
+    t1 = i
+    t1 = t1 + 1
+    i = t1
+    t1 = i
+    if t1 != 1 goto L3
+    goto L1
+L3:
+    goto L2
+    goto L1
+L2:
+func_end main
+```
+
+El `goto L1` después del salto de `break` queda inalcanzable. Se conserva porque
+esta pasada no elimina código muerto del TAC.
+
 ### 7.10 Ternario
 
+Solo se ejecuta la rama seleccionada; ambas escriben el mismo temporal.
+
+```cps
+let x = 2;
+let y = x > 1 ? 10 : 20;
 ```
-x = E ? A : B            cond(E, fall, Lf)
-                         t1 = A.place
-                         goto Lend
-                       Lf:
-                         t1 = B.place
-                       Lend:
-                         x = t1
+
+```tac
+func_begin main, 4
+    x = 2
+    t1 = x
+    if t1 <= 1 goto L1
+    t1 = 10
+    goto L2
+L1:
+    t1 = 20
+L2:
+    y = t1
+func_end main
 ```
 
 ### 7.11 try / catch
 
+La división por cero se detecta en ejecución, no durante la generación del TAC.
+
+```cps
+try { print(1 / 0); } catch (e) { print(e); }
 ```
-try S1 catch (e) S2      push_handler Lcatch
-                         S1
-                         pop_handler
-                         goto Lend
-                       Lcatch:
-                         e = exception
-                         S2
-                       Lend:
+
+```tac
+func_begin main, 4
+    push_handler L1
+    t1 = 1 / 0
+    print t1
+    pop_handler
+    goto L2
+L1:
+    e = exception
+    print e
+L2:
+func_end main
 ```
 
 **Supuestos** (catálogo en `compiscript/ir/runtime.py`):
@@ -428,15 +656,28 @@ try S1 catch (e) S2      push_handler Lcatch
 
 ### 7.12 Arreglos
 
+```cps
+let xs: integer[] = [1, 2, 3];
+let i = 1;
+print(xs[i]);
+xs[0] = 5;
 ```
-let xs: integer[] = [1, 2, 3];      t1 = alloc 3
-                                    t1[0] = 1
-                                    t1[1] = 2
-                                    t1[2] = 3
-                                    xs = t1
-print(xs[i]);                       t1 = xs[i]
-                                    print t1
-xs[0] = 5;                          xs[0] = 5
+
+```tac
+func_begin main, 8
+    t1 = alloc 3
+    t1[0] = 1
+    t1[1] = 2
+    t1[2] = 3
+    xs = t1
+    i = 1
+    t1 = xs
+    t2 = i
+    t1 = t1[t2]
+    print t1
+    t1 = xs
+    t1[0] = 5
+func_end main
 ```
 
 **Supuesto:** el índice es en **elementos**, no en bytes; el arreglo guarda su
@@ -449,46 +690,74 @@ tiempo de ejecución (capturable con try/catch).
 **Layout:** `[obj + 0]` = puntero a la vtable; después los atributos heredados,
 con los mismos offsets que en la clase padre, y luego los propios.
 
+El ejemplo combina creación, atributos, constructor heredado y despacho
+dinámico: `p` tiene tipo declarado `Animal`, pero `hablar` se resuelve en la
+vtable de `Perro`.
+
+```cps
+class Animal {
+  let nombre: string = "sin nombre";
+  function constructor(n: string) { this.nombre = n; }
+  function hablar(): string { return this.nombre; }
+}
+class Perro : Animal {
+  let edad: integer = 1;
+  function hablar(): string { return this.nombre + " ladra"; }
+}
+let p: Animal = new Perro("Fido");
+print(p.hablar());
 ```
-Clase Perro : Animal  object_size = 20
+
+```tac
+func_begin main, 8
+    t1 = new Perro, 12
+    param t1
+    call $init_Perro, 1
+    t2 = t1
+    param t2
+    param "Fido"
+    call Animal_constructor, 2
+    p = t1
+    t1 = p
+    t2 = method t1, hablar
+    param t1
+    t1 = call t2, 1
+    print t1
+func_end main
+func_begin $init_Animal, 8
+    [$this + 4] = "sin nombre"    # $this.nombre
+func_end $init_Animal
+func_begin Animal_constructor, 16
+    t1 = this
+    [t1 + 4] = n    # t1.nombre
+func_end Animal_constructor
+func_begin Animal_hablar, 12
+    t1 = this
+    t1 = [t1 + 4]    # t1.nombre
+    return t1
+func_end Animal_hablar
+func_begin $init_Perro, 12
+    param $this
+    call $init_Animal, 1
+    [$this + 8] = 1    # $this.edad
+func_end $init_Perro
+func_begin Perro_hablar, 12
+    t1 = this
+    t1 = [t1 + 4]    # t1.nombre
+    t1 = concat t1, " ladra"
+    return t1
+func_end Perro_hablar
+```
+
+Extracto del layout real de este mismo programa (`res.table.format_runtime()`):
+
+```text
+Clase Perro : Animal  object_size = 12
   [obj + 0  ] vtable
   [obj + 4  ] nombre (4 B) (heredado)
-  [obj + 8  ] edad (4 B) (heredado)
-  [obj + 12 ] raza (4 B)
-  [obj + 16 ] peso (4 B)
-  vtable[0] hablar -> Perro_hablar      # sobreescribe Animal_hablar en la misma ranura
-  vtable[1] info -> Animal_info
-```
-
-**Creación** (`new` + llamada directa al constructor, propio o heredado):
-
-```
-let p: Perro = new Perro("Fido");   t1 = new Perro, 20
-                                    param t1
-                                    call $init_Perro, 1       # atributos por instancia
-                                    param t1                 # this
-                                    param "Fido"
-                                    call Animal_constructor, 2
-                                    p = t1
-```
-
-**Atributos** (`this` es el parámetro 0 de cada método):
-
-```
-this.nombre = n;                    [this + 4] = n           # this.nombre
-print(p.edad);                      t1 = [p + 8]             # p.edad
-                                    print t1
-```
-
-**Métodos — decisión: despacho dinámico por vtable.** Una variable de tipo
-`Animal` puede contener un `Perro`, y `hablar` está sobreescrito; con
-resolución estática se llamaría al método equivocado. Por eso:
-
-```
-print(a.hablar());                  t1 = method a, hablar    # vtable de a, ranura de "hablar"
-                                    param a
-                                    t2 = call t1, 1
-                                    print t2
+  [obj + 8  ] edad (4 B)
+  vtable[0] hablar -> Perro_hablar
+  constructor -> Animal_constructor
 ```
 
 La ranura de cada método es la misma en toda la jerarquía
@@ -512,18 +781,38 @@ evita colisiones porque no es válido en identificadores de Compiscript.
 
 ### 7.14 Funciones, recursión y closures
 
+```cps
+function fact(n: integer): integer {
+  if (n <= 1) { return 1; }
+  return n * fact(n - 1);
+}
+print(fact(5));
 ```
-function fact(n: integer): integer {     func_begin fact, 16
-  if (n <= 1) { return 1; }                if n > 1 goto L1
-  return n * fact(n - 1);                  return 1
-}                                        L1:
-                                           t1 = n - 1
-                                           param t1
-                                           t1 = call fact, 1
-                                           t1 = n * t1
-                                           return t1
-                                         func_end fact
+
+```tac
+func_begin main, 4
+    param 5
+    t1 = call fact, 1
+    print t1
+func_end main
+func_begin fact, 20
+    t1 = n
+    if t1 > 1 goto L1
+    return 1
+L1:
+    t1 = n
+    t2 = n
+    t2 = t2 - 1
+    param t2
+    t2 = call fact, 1
+    t1 = t1 * t2
+    return t1
+func_end fact
 ```
+
+El marco de `fact` ocupa 20 bytes: 8 de encabezado (control y retorno), 4 del
+parámetro `n` y 8 de temporales. `t1` conserva `n` durante la llamada recursiva;
+`t2` guarda primero el argumento y luego el resultado.
 
 **Closures — decisión: enlace estático (static link).** Las funciones anidadas
 acceden a variables de funciones externas siguiendo `hops` enlaces estáticos
@@ -532,12 +821,35 @@ función no puede guardarse en una variable ni retornarse como valor (la fase
 semántica lo rechaza): una función anidada nunca sobrevive al marco que la
 contiene, así que no hace falta copiar las capturas al heap.
 
-```
+```cps
 function externa(n: integer): integer {
-  function interna(): integer { return n + 1; }     # n: fp^1[+8]
+  function interna(): integer { return n + 1; }
   return interna();
 }
+print(externa(4));
 ```
+
+```tac
+func_begin main, 4
+    param 4
+    t1 = call externa, 1
+    print t1
+func_end main
+func_begin externa_interna, 12
+    t1 = n
+    t1 = t1 + 1
+    return t1
+func_end externa_interna
+func_begin externa, 16
+    t1 = call externa_interna, 0
+    return t1
+func_end externa
+```
+
+En `externa_interna`, el operando de `n` lleva `hops = 1` y dirección completa
+`fp^1[+8]`, aunque el TAC legible muestra solo `n`. La función anidada aparece
+primero porque su búfer se cierra antes que el de `externa`; los cuerpos nunca
+quedan anidados dentro del TAC.
 
 ## 8. Supuestos generales
 
